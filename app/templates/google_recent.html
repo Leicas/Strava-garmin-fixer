@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Google Health — StravaFit{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-2xl font-semibold">Recent Google Health exercises</h1>
+  {% if connected %}
+    <span class="badge badge-success badge-outline">Google Health connected</span>
+  {% else %}
+    <span class="badge badge-warning badge-outline">Not connected</span>
+  {% endif %}
+</div>
+
+{% if not connected %}
+  <div class="alert alert-warning">
+    <div>
+      <h3 class="font-bold">Google Health not connected</h3>
+      <p class="text-sm mt-1">Connect your Google account from <a href="/settings" class="link link-primary">Settings</a>.</p>
+      <p class="text-xs opacity-70 mt-1">
+        Make sure <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> are set in
+        the deploy env, the Health API is enabled in your Google Cloud project, and your account
+        is added as a test user under the OAuth consent screen.
+      </p>
+    </div>
+  </div>
+{% elif error %}
+  <div class="alert alert-error"><span>{{ error }}</span></div>
+{% elif not activities %}
+  <div class="alert"><span>No Google Health exercises this month.</span></div>
+{% else %}
+  <div class="overflow-x-auto bg-base-100 rounded-lg shadow">
+    <table class="table table-zebra">
+      <thead>
+        <tr>
+          <th>Started</th>
+          <th>Activity type</th>
+          <th>Data point id</th>
+          <th>Duration</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in activities %}
+          {% set ex = a.exercise or {} %}
+          {% set interval = ex.interval or {} %}
+          {% set dpid = (a.name or '').rsplit('/', 1)[-1] %}
+        <tr>
+          <td class="whitespace-nowrap">{{ (interval.startTime or '')[:19] }}</td>
+          <td>{{ ex.activityType or '' }}</td>
+          <td class="font-mono text-xs">{{ dpid }}</td>
+          <td class="text-xs opacity-70">
+            {% if interval.startTime and interval.endTime %}
+              {{ interval.startTime[:19] }} → {{ interval.endTime[:19] }}
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+{% endblock %}

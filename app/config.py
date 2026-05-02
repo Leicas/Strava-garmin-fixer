@@ -19,9 +19,9 @@ class Settings(BaseSettings):
     strava_client_id: str = ""
     strava_client_secret: str = ""
 
-    # Fitbit
-    fitbit_client_id: str = ""
-    fitbit_client_secret: str = ""
+    # Google Health (replaces the deprecated Fitbit Web API)
+    google_client_id: str = ""
+    google_client_secret: str = ""
 
     # Webhook
     verify_token: str = Field(default="change-me", min_length=1)
@@ -40,8 +40,8 @@ class Settings(BaseSettings):
         return f"{self.public_base_url.rstrip('/')}/auth/strava/callback"
 
     @property
-    def fitbit_redirect_uri(self) -> str:
-        return f"{self.public_base_url.rstrip('/')}/auth/fitbit/callback"
+    def google_redirect_uri(self) -> str:
+        return f"{self.public_base_url.rstrip('/')}/auth/google/callback"
 
 
 settings = Settings()

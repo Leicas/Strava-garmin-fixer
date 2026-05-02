@@ -16,6 +16,15 @@ async def init_db() -> None:
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
     async with aiosqlite.connect(settings.database_path) as db:
         await db.executescript(schema)
+        # Migration: pre-Google rename of fitbit_log_id -> external_id.
+        # SQLite errors if the column doesn't exist, so swallow that case.
+        for table in ("processed_activities", "jobs"):
+            try:
+                await db.execute(
+                    f"ALTER TABLE {table} RENAME COLUMN fitbit_log_id TO external_id"
+                )
+            except aiosqlite.OperationalError:
+                pass
         await db.commit()
 
 

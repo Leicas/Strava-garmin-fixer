@@ -11,7 +11,7 @@ LOOP_MARKER: str = "[merged-by-stravafit]"
 async def enqueue(
     strava_id: int,
     *,
-    fitbit_log_id: int | None = None,
+    external_id: str | None = None,
     trigger: str,
     dry_run: bool = False,
 ) -> int:
@@ -19,10 +19,10 @@ async def enqueue(
     async with connect() as db:
         cursor = await db.execute(
             """
-            INSERT INTO jobs (strava_id, fitbit_log_id, trigger, status, dry_run, log)
+            INSERT INTO jobs (strava_id, external_id, trigger, status, dry_run, log)
             VALUES (?, ?, ?, 'queued', ?, '')
             """,
-            (strava_id, fitbit_log_id, trigger, 1 if dry_run else 0),
+            (strava_id, external_id, trigger, 1 if dry_run else 0),
         )
         await db.commit()
         job_id = cursor.lastrowid
@@ -96,7 +96,7 @@ async def list_recent(limit: int = 50) -> list[dict[str, Any]]:
 async def record_processed(
     strava_id: int,
     *,
-    fitbit_log_id: int | None,
+    external_id: str | None,
     result: str,
     notes: str | None = None,
 ) -> None:
@@ -104,15 +104,15 @@ async def record_processed(
     async with connect() as db:
         await db.execute(
             """
-            INSERT INTO processed_activities (strava_id, fitbit_log_id, merged_at, result, notes)
+            INSERT INTO processed_activities (strava_id, external_id, merged_at, result, notes)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(strava_id) DO UPDATE SET
-                fitbit_log_id = excluded.fitbit_log_id,
-                merged_at     = excluded.merged_at,
-                result        = excluded.result,
-                notes         = excluded.notes
+                external_id = excluded.external_id,
+                merged_at   = excluded.merged_at,
+                result      = excluded.result,
+                notes       = excluded.notes
             """,
-            (strava_id, fitbit_log_id, int(time.time()), result, notes),
+            (strava_id, external_id, int(time.time()), result, notes),
         )
         await db.commit()
 

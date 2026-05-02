@@ -6,7 +6,7 @@ from typing import Any
 import structlog
 
 from app import jobs
-from app.fitbit.client import FitbitClient, FitbitNotConfigured
+from app.google_health.client import GoogleHealthClient, GoogleNotConfigured
 from app.merge import MergeError, merge_streams_to_fit
 from app.strava.client import StravaClient, StravaNotConfigured, StravaUploadError
 
@@ -42,9 +42,7 @@ async def run_merge_job(job_id: int) -> None:
         return
 
     strava_id = int(job["strava_id"])
-    fitbit_log_id_in: int | None = (
-        int(job["fitbit_log_id"]) if job["fitbit_log_id"] is not None else None
-    )
+    external_id_in: str | None = job["external_id"] if job["external_id"] is not None else None
     dry_run = bool(job["dry_run"])
 
     bound = log.bind(job_id=job_id, strava_id=strava_id, dry_run=dry_run)
@@ -54,11 +52,10 @@ async def run_merge_job(job_id: int) -> None:
 
     activity: dict[str, Any]
     streams: dict[str, Any]
-    chosen_log_id: int | None = fitbit_log_id_in
+    chosen_external_id: str | None = external_id_in
     new_id: int | None = None
 
     try:
-        # Step 2: pull Strava activity + streams
         try:
             async with StravaClient.open() as sc:
                 await _say(job_id, "strava.fetch_activity")
@@ -70,53 +67,58 @@ async def run_merge_job(job_id: int) -> None:
             await jobs.mark_error(job_id, f"strava_not_configured: {exc}")
             await jobs.record_processed(
                 strava_id,
-                fitbit_log_id=fitbit_log_id_in,
-                result=f"error:strava_not_configured",
+                external_id=external_id_in,
+                result="error:strava_not_configured",
             )
             return
 
         start_dt = _parse_strava_start(activity.get("start_date"))
         await _say(job_id, "strava.parsed_start", start_dt=start_dt.isoformat())
 
-        # Step 3: pull Fitbit TCX (find_near if no explicit log id)
         try:
-            async with FitbitClient.open() as fc:
-                if chosen_log_id is None:
-                    await _say(job_id, "fitbit.find_near", window_minutes=120)
-                    matches = await fc.find_near(start_dt, window_minutes=120)
+            async with GoogleHealthClient.open() as gc:
+                if chosen_external_id is None:
+                    await _say(job_id, "google.find_near", window_minutes=120)
+                    matches = await gc.find_near(start_dt, window_minutes=120)
                     if not matches:
-                        await _say(job_id, "fitbit.no_match")
+                        await _say(job_id, "google.no_match")
                         await jobs.record_processed(
                             strava_id,
-                            fitbit_log_id=None,
+                            external_id=None,
                             result="skipped:no_match",
                         )
                         await jobs.mark_success(job_id)
                         return
                     first = matches[0]
-                    chosen_log_id = int(first["logId"])
+                    name = first.get("name") or ""
+                    chosen_external_id = (
+                        name.rsplit("/", 1)[-1] if "/dataPoints/" in name else None
+                    )
+                    if not chosen_external_id:
+                        await _say(job_id, "google.match_missing_id", first=first)
+                        await jobs.mark_error(job_id, "google match has no parseable name")
+                        return
                     await _say(
                         job_id,
-                        "fitbit.chose_match",
-                        log_id=chosen_log_id,
+                        "google.chose_match",
+                        external_id=chosen_external_id,
                         candidates=len(matches),
                     )
                 else:
-                    await _say(job_id, "fitbit.using_explicit_log_id", log_id=chosen_log_id)
+                    await _say(job_id, "google.using_explicit_id", external_id=chosen_external_id)
 
-                await _say(job_id, "fitbit.fetch_tcx", log_id=chosen_log_id)
-                tcx = await fc.get_activity_tcx(chosen_log_id)
-        except FitbitNotConfigured as exc:
-            await _say(job_id, "fitbit.not_configured", err=str(exc))
-            await jobs.mark_error(job_id, f"fitbit_not_configured: {exc}")
+                await _say(job_id, "google.fetch_tcx", external_id=chosen_external_id)
+                tcx = await gc.get_exercise_tcx(chosen_external_id)
+        except GoogleNotConfigured as exc:
+            await _say(job_id, "google.not_configured", err=str(exc))
+            await jobs.mark_error(job_id, f"google_not_configured: {exc}")
             await jobs.record_processed(
                 strava_id,
-                fitbit_log_id=fitbit_log_id_in,
-                result="error:fitbit_not_configured",
+                external_id=external_id_in,
+                result="error:google_not_configured",
             )
             return
 
-        # Step 4: merge
         activity_name = activity.get("name") or "Merged ride"
         try:
             await _say(job_id, "merge.start", name=activity_name)
@@ -131,20 +133,17 @@ async def run_merge_job(job_id: int) -> None:
             await jobs.mark_error(job_id, f"merge_error: {exc}")
             await jobs.record_processed(
                 strava_id,
-                fitbit_log_id=chosen_log_id,
+                external_id=chosen_external_id,
                 result=f"error:merge:{exc}",
             )
             return
 
         n_bytes = len(result.fit_bytes)
         warnings = list(getattr(result, "warnings", []) or [])
-        await _say(
-            job_id, "merge.done", bytes=n_bytes, warnings=len(warnings)
-        )
+        await _say(job_id, "merge.done", bytes=n_bytes, warnings=len(warnings))
         for w in warnings:
             await jobs.append_log(job_id, f"warning: {w}")
 
-        # Step 5: dry-run short-circuit
         if dry_run:
             await jobs.append_log(
                 job_id,
@@ -152,21 +151,17 @@ async def run_merge_job(job_id: int) -> None:
             )
             await jobs.record_processed(
                 strava_id,
-                fitbit_log_id=chosen_log_id,
+                external_id=chosen_external_id,
                 result="success",
                 notes=f"dry_run bytes={n_bytes} warnings={len(warnings)}",
             )
             await jobs.mark_success(job_id)
             return
 
-        # Step 6: delete original + upload merged
         base_desc = activity.get("description") or ""
         new_desc = f"{base_desc} {jobs.LOOP_MARKER}".strip()
         original_name = activity.get("name")
 
-        # Capture bytes for potential restore — we don't have the original .fit
-        # bytes (Strava streams != original file), so the recovery story is to
-        # log loudly. See the task notes.
         try:
             async with StravaClient.open() as sc:
                 await _say(job_id, "strava.delete_original")
@@ -187,8 +182,6 @@ async def run_merge_job(job_id: int) -> None:
                 new_id = int(final["activity_id"])
                 await _say(job_id, "strava.upload_finished", new_activity_id=new_id)
 
-                # Strava sometimes overwrites the name from FIT metadata.
-                # If we had an original name, force it back.
                 if original_name:
                     try:
                         await sc.update_activity(new_id, name=original_name)
@@ -196,10 +189,6 @@ async def run_merge_job(job_id: int) -> None:
                     except Exception as ne:  # noqa: BLE001 - non-fatal touch-up
                         await _say(job_id, "strava.name_restore_failed", err=str(ne))
         except Exception as exc:
-            # Original may already be deleted. We do not have the original .fit
-            # bytes locally, so the safest thing is to record loudly and stop.
-            # Future improvement noted in the task spec: re-upload the unmodified
-            # file BEFORE deleting next time.
             await _say(
                 job_id,
                 "strava.upload_failed_after_delete",
@@ -215,16 +204,15 @@ async def run_merge_job(job_id: int) -> None:
             await jobs.mark_error(job_id, f"upload_failed_after_delete: {exc}")
             await jobs.record_processed(
                 strava_id,
-                fitbit_log_id=chosen_log_id,
+                external_id=chosen_external_id,
                 result=f"error:upload_failed_after_delete:{exc}",
                 notes="original may be lost; manual review required",
             )
             return
 
-        # Step 7: record success
         await jobs.record_processed(
             strava_id,
-            fitbit_log_id=chosen_log_id,
+            external_id=chosen_external_id,
             result="success",
             notes=f"new_id={new_id}",
         )
@@ -238,7 +226,7 @@ async def run_merge_job(job_id: int) -> None:
             await jobs.mark_error(job_id, f"unhandled: {exc}")
             await jobs.record_processed(
                 strava_id,
-                fitbit_log_id=chosen_log_id,
+                external_id=chosen_external_id,
                 result=f"error:unhandled:{exc}",
             )
         except Exception:  # noqa: BLE001 - last-ditch

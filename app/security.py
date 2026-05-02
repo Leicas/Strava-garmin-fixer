@@ -42,13 +42,13 @@ log = structlog.get_logger()
 # - /healthz: monitoring
 # - /webhook/strava: the provider can't authenticate; uses verify_token
 #   (handshake) and owner_id (events) instead.
-# - /auth/strava/callback, /auth/fitbit/callback: providers can't authenticate;
+# - /auth/strava/callback, /auth/google/callback: providers can't authenticate;
 #   security is enforced via the OAuth `state` parameter (see app/auth_router.py).
 _PUBLIC_PATHS: frozenset[str] = frozenset({
     "/healthz",
     "/webhook/strava",
     "/auth/strava/callback",
-    "/auth/fitbit/callback",
+    "/auth/google/callback",
 })
 
 

@@ -15,7 +15,7 @@ from lxml import etree
 from app import jobs as jobs_mod
 from app import tokens as token_store
 from app.db import connect
-from app.fitbit.client import FitbitClient, FitbitNotConfigured
+from app.google_health.client import GoogleHealthClient, GoogleNotConfigured
 from app.merge import MergeError, merge_streams_to_fit
 from app.security import require_htmx
 from app.strava.client import StravaClient, StravaNotConfigured
@@ -87,7 +87,7 @@ def _parse_strava_start(iso: str | None) -> datetime:
 async def _processed_lookup() -> dict[int, dict[str, Any]]:
     async with connect() as db:
         rows = await (await db.execute(
-            "SELECT strava_id, fitbit_log_id, result, notes FROM processed_activities"
+            "SELECT strava_id, external_id, result, notes FROM processed_activities"
         )).fetchall()
     return {int(r["strava_id"]): dict(r) for r in rows}
 
@@ -139,7 +139,7 @@ TCX_NS = {"tcd": "http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"}
 
 
 def _tcx_path(tcx_bytes: bytes) -> list[list[float]]:
-    """Extract [[lat, lon], ...] from a Fitbit TCX. Trackpoints lacking position
+    """Extract [[lat, lon], ...] from a TCX. Trackpoints lacking position
     are skipped (e.g., tunnels)."""
     try:
         root = etree.fromstring(tcx_bytes)
@@ -233,27 +233,27 @@ async def activity_detail(request: Request, strava_id: int) -> HTMLResponse:
     return templates.TemplateResponse(request, "activity_detail.html", ctx)
 
 
-@router.get("/activity/{strava_id}/_fitbit_matches", response_class=HTMLResponse)
-async def activity_fitbit_matches(request: Request, strava_id: int) -> HTMLResponse:
-    """HTMX fragment: list candidate Fitbit logs near the activity start."""
+@router.get("/activity/{strava_id}/_google_matches", response_class=HTMLResponse)
+async def activity_google_matches(request: Request, strava_id: int) -> HTMLResponse:
+    """HTMX fragment: list candidate Google Health exercises near the activity start."""
     matches: list[dict[str, Any]] = []
     error: str | None = None
     try:
         async with StravaClient.open() as sc:
             activity = await sc.get_activity(strava_id)
         start_dt = _parse_strava_start(activity.get("start_date"))
-        async with FitbitClient.open() as fc:
-            matches = await fc.find_near(start_dt, window_minutes=120)
+        async with GoogleHealthClient.open() as gc:
+            matches = await gc.find_near(start_dt, window_minutes=120)
     except StravaNotConfigured:
         error = "Strava not connected."
-    except FitbitNotConfigured:
-        error = "Fitbit not connected. Run `stravafit fitbit login`."
+    except GoogleNotConfigured:
+        error = "Google Health not connected. Connect from Settings."
     except Exception as e:  # noqa: BLE001 - surface in UI
         error = f"{type(e).__name__}: {e}"
 
     return templates.TemplateResponse(
         request,
-        "partials/fitbit_matches.html",
+        "partials/google_matches.html",
         {"strava_id": strava_id, "matches": matches, "error": error},
     )
 
@@ -264,14 +264,14 @@ async def activity_merge(
     request: Request,
     strava_id: int,
     bg: BackgroundTasks,
-    fitbit_log_id: int | None = Form(None),
+    external_id: str | None = Form(None),
     dry_run: bool = Form(False),
 ) -> HTMLResponse:
     from app.worker import run_merge_job
 
     job_id = await jobs_mod.enqueue(
         strava_id,
-        fitbit_log_id=fitbit_log_id,
+        external_id=external_id,
         trigger="manual",
         dry_run=dry_run,
     )
@@ -280,7 +280,7 @@ async def activity_merge(
                                          "strava_id": strava_id, "started_at": None,
                                          "finished_at": None, "trigger": "manual",
                                          "dry_run": int(dry_run), "error": None,
-                                         "fitbit_log_id": fitbit_log_id, "log": ""}
+                                         "external_id": external_id, "log": ""}
     return templates.TemplateResponse(
         request, "partials/job_row.html",
         {"job": _shape_job(job)},
@@ -289,16 +289,16 @@ async def activity_merge(
 
 # ---------- preview ---------------------------------------------------------
 
-@router.get("/preview/{strava_id}/{fitbit_log_id}", response_class=HTMLResponse)
-async def preview(request: Request, strava_id: int, fitbit_log_id: int) -> HTMLResponse:
+@router.get("/preview/{strava_id}/{external_id}", response_class=HTMLResponse)
+async def preview(request: Request, strava_id: int, external_id: str) -> HTMLResponse:
     ctx: dict[str, Any] = {
         "strava_id": strava_id,
-        "fitbit_log_id": fitbit_log_id,
+        "external_id": external_id,
         "error": None,
         "warnings": [],
         "stats": None,
         "edge_path_json": "[]",
-        "fitbit_path_json": "[]",
+        "source_path_json": "[]",
         "activity_name": "",
     }
     try:
@@ -309,11 +309,11 @@ async def preview(request: Request, strava_id: int, fitbit_log_id: int) -> HTMLR
         ctx["activity_started_at"] = _format_date(activity.get("start_date_local"))
         start_dt = _parse_strava_start(activity.get("start_date"))
 
-        async with FitbitClient.open() as fc:
-            tcx = await fc.get_activity_tcx(fitbit_log_id)
+        async with GoogleHealthClient.open() as gc:
+            tcx = await gc.get_exercise_tcx(external_id)
 
         edge_path = _strava_latlng_path(streams)
-        fitbit_path = _tcx_path(tcx)
+        source_path = _tcx_path(tcx)
 
         merge_error: str | None = None
         result_summary: dict[str, Any] | None = None
@@ -334,16 +334,16 @@ async def preview(request: Request, strava_id: int, fitbit_log_id: int) -> HTMLR
             merge_error = str(e)
 
         ctx["edge_path_json"] = json.dumps(edge_path)
-        ctx["fitbit_path_json"] = json.dumps(fitbit_path)
+        ctx["source_path_json"] = json.dumps(source_path)
         ctx["edge_point_count"] = len(edge_path)
-        ctx["fitbit_point_count"] = len(fitbit_path)
+        ctx["source_point_count"] = len(source_path)
         ctx["stats"] = result_summary
         ctx["merge_error"] = merge_error
 
     except StravaNotConfigured:
         ctx["error"] = "Strava not connected."
-    except FitbitNotConfigured:
-        ctx["error"] = "Fitbit not connected."
+    except GoogleNotConfigured:
+        ctx["error"] = "Google Health not connected."
     except Exception as e:  # noqa: BLE001 - surface in UI
         ctx["error"] = f"{type(e).__name__}: {e}"
 
@@ -361,30 +361,35 @@ async def manual_form(request: Request) -> HTMLResponse:
 async def manual_submit(
     request: Request,
     strava_id: int = Form(...),
-    fitbit_log_id: int = Form(...),
+    external_id: str = Form(...),
 ) -> RedirectResponse:
-    return RedirectResponse(url=f"/preview/{strava_id}/{fitbit_log_id}", status_code=303)
+    return RedirectResponse(url=f"/preview/{strava_id}/{external_id}", status_code=303)
 
 
-# ---------- fitbit recent ---------------------------------------------------
+# ---------- google health recent --------------------------------------------
 
-@router.get("/fitbit/recent", response_class=HTMLResponse)
-async def fitbit_recent(request: Request) -> HTMLResponse:
+@router.get("/google/recent", response_class=HTMLResponse)
+async def google_recent(request: Request) -> HTMLResponse:
     ctx: dict[str, Any] = {"connected": False, "activities": [], "error": None}
     try:
-        async with FitbitClient.open() as client:
+        async with GoogleHealthClient.open() as client:
             after = (datetime.now(timezone.utc).date().replace(day=1)).isoformat()
-            activities = await client.list_activities(after_date=after, limit=30)
+            activities = await client.list_exercises(after_date=after, page_size=25)
         ctx["connected"] = True
-        # newest first
-        activities.sort(key=lambda a: a.get("startTime") or "", reverse=True)
+        # newest first — sort on whatever start time the activity has
+        activities.sort(
+            key=lambda a: (
+                ((a.get("exercise") or {}).get("interval") or {}).get("startTime") or ""
+            ),
+            reverse=True,
+        )
         ctx["activities"] = activities
-    except FitbitNotConfigured:
+    except GoogleNotConfigured:
         pass
     except httpx.HTTPError as e:
         ctx["connected"] = True
-        ctx["error"] = f"Fitbit API error: {e}"
-    return templates.TemplateResponse(request, "fitbit_recent.html", ctx)
+        ctx["error"] = f"Google Health API error: {e}"
+    return templates.TemplateResponse(request, "google_recent.html", ctx)
 
 
 # ---------- jobs -------------------------------------------------------------
@@ -393,7 +398,7 @@ def _shape_job(j: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": j["id"],
         "strava_id": j["strava_id"],
-        "fitbit_log_id": j.get("fitbit_log_id"),
+        "external_id": j.get("external_id"),
         "trigger": j["trigger"],
         "status": j["status"],
         "status_badge": _job_status_badge(j["status"]),
@@ -437,18 +442,18 @@ async def settings_page(
     auto_merge = _truthy(await _setting_get("auto_merge_enabled", "true"))
     default_dry_run = _truthy(await _setting_get("default_dry_run", "false"))
     strava_tok = await token_store.load("strava")
-    fitbit_tok = await token_store.load("fitbit")
+    google_tok = await token_store.load("google")
     return templates.TemplateResponse(
         request, "settings.html",
         {
             "auto_merge_enabled": auto_merge,
             "default_dry_run": default_dry_run,
             "strava_expires_at": _format_unix(strava_tok.expires_at) if strava_tok else None,
-            "fitbit_expires_at": _format_unix(fitbit_tok.expires_at) if fitbit_tok else None,
+            "google_expires_at": _format_unix(google_tok.expires_at) if google_tok else None,
             "strava_expired": (strava_tok.expired if strava_tok else None),
-            "fitbit_expired": (fitbit_tok.expired if fitbit_tok else None),
+            "google_expired": (google_tok.expired if google_tok else None),
             "strava_connected": strava_tok is not None,
-            "fitbit_connected": fitbit_tok is not None,
+            "google_connected": google_tok is not None,
             "flash_connected": connected,
             "flash_error": auth_error,
         },

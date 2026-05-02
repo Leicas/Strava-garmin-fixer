@@ -11,8 +11,8 @@ See `PLAN.md` for the full architecture; phases 0–6 are all shipped.
 uv sync
 cp .env.example .env          # then fill in the OAuth creds
 uv run python -m app.cli strava login
-uv run python -m app.cli fitbit login
 uv run uvicorn app.main:app --reload --port 8000
+# Then click "Connect Google" on /settings to finish OAuth via the dashboard.
 ```
 
 Then open <http://localhost:8000/> and <http://localhost:8000/healthz>.
@@ -65,7 +65,7 @@ a tunnel or reverse proxy for production).
 No shell access required. From <http://localhost:8000/settings>:
 
 1. Click **Connect Strava** → redirected to Strava → consent → bounced back to `/settings`.
-2. Click **Connect Fitbit** → same flow.
+2. Click **Connect Google** → same flow against Google Health.
 
 Tokens persist in `./data/state.db` (mounted volume), so you only do this once
 unless you revoke access.
@@ -77,7 +77,20 @@ The provider has to know where to redirect back to. Register these once:
 | Provider | Where | Setting | Value |
 |---|---|---|---|
 | Strava | <https://www.strava.com/settings/api> | Authorization Callback Domain | the host of `PUBLIC_BASE_URL` (no scheme, no port, no path — e.g. `stravafit.example.com` or `localhost`) |
-| Fitbit | <https://dev.fitbit.com/apps/new> | Redirect URI | `<PUBLIC_BASE_URL>/auth/fitbit/callback` (full URL, exact match). App type: **Personal** |
+| Google Health | <https://console.cloud.google.com/> | Authorized redirect URI | `<PUBLIC_BASE_URL>/auth/google/callback` (full URL, exact match) |
+
+**Google Health setup:**
+1. In Google Cloud Console, create a project and enable the **Health API** (`health.googleapis.com`).
+2. Configure the OAuth consent screen — for personal use leave it in "Testing" mode and add yourself as a test user.
+3. Create OAuth 2.0 credentials → application type **Web application** → add the redirect URI above.
+4. Copy the client ID + client secret into `.env` as `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.
+
+The Google Health API replaces the deprecated Fitbit Web API. Same TCX export
+endpoint shape (`:exportExerciseTcx` returns `{"tcxData": "..."}`), so the
+merge function works unchanged. Required scopes are
+`googlehealth.activity_and_fitness.readonly`,
+`googlehealth.location.readonly`, and
+`googlehealth.health_metrics_and_measurements.readonly`.
 
 `PUBLIC_BASE_URL` in your `.env` must match what the user's browser can reach
 the service at — for pure-localhost dev that's `http://localhost:8000`; for a
@@ -108,13 +121,13 @@ The `stravafit` CLI is shipped in the image for inspection / debugging:
 
 ```sh
 docker compose exec stravafit uv run python -m app.cli strava list
-docker compose exec stravafit uv run python -m app.cli fitbit find-near 2026-05-02T08:00:00Z
+docker compose exec stravafit uv run python -m app.cli google find-near 2026-05-02T08:00:00Z
 docker compose exec stravafit uv run python -m app.cli run-merge <strava_id> --dry-run
 ```
 
-`strava login` / `fitbit login` still work for host-based development (they
-spin up local HTTP listeners on 8001 / 8002), but the dashboard flow is the
-recommended path for any server deployment.
+`strava login` still works for host-based dev (local listener on `:8001`).
+Google Health connection only goes through the dashboard — no CLI variant —
+since Google's OAuth requires a registered web client.
 
 ## Deploy via Komodo
 
@@ -139,7 +152,7 @@ expand that, which is why it's split from the local file).
 app/
   main.py            FastAPI app + lifespan
   config.py          pydantic-settings
-  db.py              aiosqlite helpers
+  db.py              aiosqlite helpers + on-startup column migration
   schema.sql         idempotent DDL
   tokens.py          shared TokenPair store
   jobs.py            jobs + processed_activities CRUD
@@ -148,10 +161,12 @@ app/
   merge.py           pure deterministic streams+TCX → FIT
   logging.py         structlog config
   cli.py             stravafit CLI entrypoint
-  strava/{auth,client}.py   OAuth + API client
-  fitbit/{auth,client}.py   OAuth (PKCE) + API client
-  dashboard/router.py       HTMX-friendly routes
-  templates/...             Jinja2 + Tailwind/DaisyUI/HTMX (CDN)
+  security.py        BasicAuthMiddleware + require_htmx CSRF guard
+  auth_router.py     /auth/{strava,google}/{start,callback}
+  strava/{auth,client}.py         OAuth + API client
+  google_health/{auth,client}.py  OAuth + API client (replaces Fitbit)
+  dashboard/router.py             HTMX-friendly routes
+  templates/...                   Jinja2 + Tailwind/DaisyUI/HTMX (CDN)
 scripts/
   bootstrap_subscription.py  idempotent subscription manager
 tests/

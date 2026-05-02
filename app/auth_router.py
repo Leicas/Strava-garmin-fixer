@@ -20,13 +20,13 @@ from fastapi.responses import RedirectResponse
 
 from app import tokens as token_store
 from app.config import settings
-from app.fitbit import auth as fitbit_auth
+from app.google_health import auth as google_auth
 from app.strava import auth as strava_auth
 
 log = structlog.get_logger()
 router = APIRouter()
 
-# state -> {"service": "strava"|"fitbit", "code_verifier": str|None, "expires_at": int}
+# state -> {"service": "strava"|"google", "code_verifier": str|None, "expires_at": int}
 _PENDING: dict[str, dict[str, Any]] = {}
 _TTL_SECONDS = 600  # 10 min
 
@@ -101,53 +101,47 @@ async def strava_callback(
     return RedirectResponse("/settings?connected=strava", status_code=303)
 
 
-# ---------- Fitbit ----------------------------------------------------------
+# ---------- Google Health ---------------------------------------------------
 
-@router.get("/auth/fitbit/start")
-async def fitbit_start() -> RedirectResponse:
-    if not settings.fitbit_client_id or not settings.fitbit_client_secret:
-        raise HTTPException(500, "FITBIT_CLIENT_ID / FITBIT_CLIENT_SECRET not set in env")
-    code_verifier, code_challenge = fitbit_auth._make_pkce_pair()
-    state = _new_state("fitbit", code_verifier=code_verifier)
-    url = fitbit_auth.build_authorize_url(
-        settings.fitbit_redirect_uri,
-        state,
-        code_challenge,
-    )
-    log.info("auth.fitbit.start")
+@router.get("/auth/google/start")
+async def google_start() -> RedirectResponse:
+    if not settings.google_client_id or not settings.google_client_secret:
+        raise HTTPException(500, "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not set in env")
+    state = _new_state("google")
+    url = google_auth.build_authorize_url(settings.google_redirect_uri, state)
+    log.info("auth.google.start")
     return RedirectResponse(url, status_code=302)
 
 
-@router.get("/auth/fitbit/callback")
-async def fitbit_callback(
+@router.get("/auth/google/callback")
+async def google_callback(
     code: str | None = Query(None),
     state: str | None = Query(None),
     error: str | None = Query(None),
 ) -> RedirectResponse:
     if error:
-        log.warning("auth.fitbit.error", error=error)
-        return RedirectResponse(f"/settings?auth_error=fitbit:{error}", status_code=303)
+        log.warning("auth.google.error", error=error)
+        return RedirectResponse(f"/settings?auth_error=google:{error}", status_code=303)
     if not code:
-        return RedirectResponse("/settings?auth_error=fitbit:no_code", status_code=303)
-    pending = _consume(state, "fitbit")
-    if pending is None:
-        return RedirectResponse("/settings?auth_error=fitbit:bad_state", status_code=303)
-    code_verifier = pending["code_verifier"]
-    if not code_verifier:
-        return RedirectResponse("/settings?auth_error=fitbit:no_verifier", status_code=303)
+        return RedirectResponse("/settings?auth_error=google:no_code", status_code=303)
+    if _consume(state, "google") is None:
+        return RedirectResponse("/settings?auth_error=google:bad_state", status_code=303)
 
     try:
-        pair = await fitbit_auth.exchange_code(
-            code, code_verifier, redirect_uri=settings.fitbit_redirect_uri,
+        pair = await google_auth.exchange_code(
+            code, redirect_uri=settings.google_redirect_uri,
         )
     except httpx.HTTPStatusError as e:
-        log.warning("auth.fitbit.exchange_failed", status=e.response.status_code,
+        log.warning("auth.google.exchange_failed", status=e.response.status_code,
                     body=e.response.text[:200])
         return RedirectResponse(
-            f"/settings?auth_error=fitbit:exchange_{e.response.status_code}",
+            f"/settings?auth_error=google:exchange_{e.response.status_code}",
             status_code=303,
         )
+    except RuntimeError as e:
+        # exchange_code raises if Google didn't return a refresh_token
+        return RedirectResponse(f"/settings?auth_error=google:{e}", status_code=303)
 
-    await token_store.save("fitbit", pair)
-    log.info("auth.fitbit.connected", expires_at=pair.expires_at)
-    return RedirectResponse("/settings?connected=fitbit", status_code=303)
+    await token_store.save("google", pair)
+    log.info("auth.google.connected", expires_at=pair.expires_at)
+    return RedirectResponse("/settings?connected=google", status_code=303)

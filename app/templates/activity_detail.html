@@ -33,7 +33,7 @@
       {% if processed %}
         <div class="alert alert-info mt-3 text-xs">
           Last processed: <code>{{ processed.result }}</code>
-          {% if processed.fitbit_log_id %}(fitbit_log_id={{ processed.fitbit_log_id }}){% endif %}
+          {% if processed.external_id %}(source id={{ processed.external_id }}){% endif %}
           {% if processed.notes %} — {{ processed.notes }}{% endif %}
         </div>
       {% endif %}
@@ -57,15 +57,15 @@
 
 <div class="card bg-base-100 shadow mt-4">
   <div class="card-body">
-    <h2 class="card-title">Find Fitbit match</h2>
+    <h2 class="card-title">Find Google Health match</h2>
     <p class="text-sm opacity-70">±2 hours of <code>{{ activity.start_date }}</code></p>
     <button class="btn btn-primary btn-sm w-fit"
-            hx-get="/activity/{{ strava_id }}/_fitbit_matches"
-            hx-target="#fitbit-matches"
+            hx-get="/activity/{{ strava_id }}/_google_matches"
+            hx-target="#google-matches"
             hx-swap="innerHTML">
       Search
     </button>
-    <div id="fitbit-matches" class="mt-3"></div>
+    <div id="google-matches" class="mt-3"></div>
   </div>
 </div>
 

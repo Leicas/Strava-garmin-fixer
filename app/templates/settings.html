@@ -55,23 +55,23 @@
           </tr>
           <tr>
             <td>
-              <div class="font-semibold">Fitbit</div>
-              <div class="text-xs opacity-60">Redirect URI: <code>{{ "{}/auth/fitbit/callback".format(request.base_url|string|trim('/')) }}</code></div>
-              <div class="text-xs opacity-60">App type must be <strong>Personal</strong>; the redirect URI above must match exactly.</div>
+              <div class="font-semibold">Google Health</div>
+              <div class="text-xs opacity-60">Redirect URI: <code>{{ "{}/auth/google/callback".format(request.base_url|string|trim('/')) }}</code></div>
+              <div class="text-xs opacity-60">Replaces the deprecated Fitbit Web API. Register an OAuth Web client in Google Cloud Console and enable the Health API.</div>
             </td>
             <td>
-              {% if fitbit_connected %}
+              {% if google_connected %}
                 <span class="badge badge-success">connected</span>
-                {% if fitbit_expired %}<span class="badge badge-warning ml-1">stale</span>{% endif %}
+                {% if google_expired %}<span class="badge badge-warning ml-1">stale</span>{% endif %}
               {% else %}
                 <span class="badge badge-ghost">not connected</span>
               {% endif %}
             </td>
-            <td class="text-xs">{{ fitbit_expires_at or "—" }}</td>
+            <td class="text-xs">{{ google_expires_at or "—" }}</td>
             <td>
-              <a class="btn btn-sm {% if fitbit_connected %}btn-outline{% else %}btn-primary{% endif %}"
-                 href="/auth/fitbit/start">
-                {{ "Reconnect" if fitbit_connected else "Connect Fitbit" }}
+              <a class="btn btn-sm {% if google_connected %}btn-outline{% else %}btn-primary{% endif %}"
+                 href="/auth/google/start">
+                {{ "Reconnect" if google_connected else "Connect Google" }}
               </a>
             </td>
           </tr>

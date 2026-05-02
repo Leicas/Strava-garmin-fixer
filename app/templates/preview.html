@@ -1,11 +1,11 @@
 {% extends "base.html" %}
-{% block title %}Preview merge {{ strava_id }} ↔ {{ fitbit_log_id }} — StravaFit{% endblock %}
+{% block title %}Preview merge {{ strava_id }} ↔ {{ external_id }} — StravaFit{% endblock %}
 
 {% block content %}
 <div class="flex items-center gap-3 mb-4">
   <a href="/activity/{{ strava_id }}" class="btn btn-ghost btn-sm">← Activity</a>
   <h1 class="text-2xl font-semibold">Preview merge</h1>
-  <span class="text-sm opacity-70">strava=<code>{{ strava_id }}</code> · fitbit=<code>{{ fitbit_log_id }}</code></span>
+  <span class="text-sm opacity-70">strava=<code>{{ strava_id }}</code> · google=<code>{{ external_id }}</code></span>
 </div>
 
 {% if error %}
@@ -17,7 +17,7 @@
     <div>
       <h3 class="font-bold">Merge sanity check failed</h3>
       <p class="text-sm mt-1">{{ merge_error }}</p>
-      <p class="text-xs mt-1 opacity-70">Distance from interpolated GPS doesn't match Strava's distance stream within tolerance. Likely a wrong Fitbit match.</p>
+      <p class="text-xs mt-1 opacity-70">Distance from interpolated GPS doesn't match Strava's distance stream within tolerance. Likely a wrong source-data match.</p>
     </div>
   </div>
 {% endif %}
@@ -29,7 +29,7 @@
       <div id="map" style="height: 480px; border-radius: 0.5rem;"></div>
       <div class="text-xs mt-2 opacity-70 flex gap-4">
         <span><span class="inline-block w-3 h-3 align-middle" style="background:#dc2626"></span> Edge / Strava ({{ edge_point_count }} pts)</span>
-        <span><span class="inline-block w-3 h-3 align-middle" style="background:#2563eb"></span> Fitbit ({{ fitbit_point_count }} pts)</span>
+        <span><span class="inline-block w-3 h-3 align-middle" style="background:#2563eb"></span> Google Health ({{ source_point_count }} pts)</span>
       </div>
     </div>
   </div>
@@ -70,14 +70,14 @@
       <h3 class="font-semibold text-sm">Commit</h3>
       <div class="flex flex-col gap-2">
         <form hx-post="/activity/{{ strava_id }}/merge" hx-target="#preview-job" hx-swap="innerHTML">
-          <input type="hidden" name="fitbit_log_id" value="{{ fitbit_log_id }}">
+          <input type="hidden" name="external_id" value="{{ external_id }}">
           <input type="hidden" name="dry_run" value="true">
           <button class="btn btn-outline btn-warning btn-sm w-full" type="submit"
                   {% if merge_error %}disabled{% endif %}>Run DRY RUN</button>
         </form>
         <form hx-post="/activity/{{ strava_id }}/merge" hx-target="#preview-job" hx-swap="innerHTML"
               hx-confirm="Delete the original Strava activity and replace it with the merged version?">
-          <input type="hidden" name="fitbit_log_id" value="{{ fitbit_log_id }}">
+          <input type="hidden" name="external_id" value="{{ external_id }}">
           <button class="btn btn-error btn-sm w-full" type="submit"
                   {% if merge_error %}disabled{% endif %}>Replace on Strava</button>
         </form>
@@ -90,7 +90,7 @@
 <script>
 (function () {
   const edge = {{ edge_path_json|safe }};
-  const fitbit = {{ fitbit_path_json|safe }};
+  const source = {{ source_path_json|safe }};
 
   const map = L.map('map');
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -102,8 +102,8 @@
   if (edge.length) {
     layers.push(L.polyline(edge, { color: '#dc2626', weight: 3, dashArray: '4,4' }).addTo(map));
   }
-  if (fitbit.length) {
-    layers.push(L.polyline(fitbit, { color: '#2563eb', weight: 3, opacity: 0.8 }).addTo(map));
+  if (source.length) {
+    layers.push(L.polyline(source, { color: '#2563eb', weight: 3, opacity: 0.8 }).addTo(map));
   }
   if (layers.length) {
     const group = L.featureGroup(layers);

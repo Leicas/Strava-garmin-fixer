@@ -1,5 +1,6 @@
-"""Pure, deterministic merge of Fitbit TCX (GPS + HR) and Strava streams (cadence,
-speed, temperature, altitude) into a Strava-uploadable FIT file.
+"""Pure, deterministic merge of source TCX (GPS + HR — historically Fitbit, now
+Google Health) and Strava streams (cadence, speed, temperature, altitude) into
+a Strava-uploadable FIT file.
 
 This module is intentionally side-effect free:
   - No I/O.
@@ -222,14 +223,24 @@ def merge_streams_to_fit(
     *,
     strava_streams: dict,
     strava_start_time: datetime,
-    fitbit_tcx: bytes,
+    fitbit_tcx: bytes | None = None,
+    source_tcx: bytes | None = None,
     activity_name: str = "Merged ride",
     distance_tolerance: float = 0.10,
 ) -> MergeResult:
-    """Combine Fitbit TCX (GPS + HR) with Strava streams into a FIT file.
+    """Combine a source TCX (GPS + HR) with Strava streams into a FIT file.
+
+    The source TCX historically came from Fitbit; today it comes from Google
+    Health (which inherited the Fitbit data). The keyword argument
+    ``fitbit_tcx`` is kept as an alias for ``source_tcx`` for backwards
+    compatibility — exactly one must be provided.
 
     Pure / deterministic: same inputs produce byte-identical output.
     """
+    if (fitbit_tcx is None) == (source_tcx is None):
+        raise MergeError("Pass exactly one of fitbit_tcx= or source_tcx=")
+    tcx_bytes = source_tcx if source_tcx is not None else fitbit_tcx
+    assert tcx_bytes is not None  # for type checkers
 
     if strava_start_time.tzinfo is None:
         raise MergeError("strava_start_time must be timezone-aware (UTC)")
@@ -245,11 +256,11 @@ def merge_streams_to_fit(
     cadences = _extract_stream(strava_streams, "cadence") or []
     temps = _extract_stream(strava_streams, "temp") or []
     altitudes = _extract_stream(strava_streams, "altitude") or []
-    # heartrate from Strava is intentionally ignored: we trust Fitbit's HR.
-    # But if Fitbit has no HR we may fall back later (not in this version).
+    # heartrate from Strava is intentionally ignored: we trust the source TCX's HR.
+    # If the source has no HR we may fall back later (not in this version).
 
     # Parse TCX trackpoints and build aux indexes.
-    trackpoints = _parse_tcx(fitbit_tcx)
+    trackpoints = _parse_tcx(tcx_bytes)
     points_with_pos = [p for p in trackpoints if p.lat is not None and p.lon is not None]
     points_with_hr = [p for p in trackpoints if p.hr is not None]
     pos_times = [p.epoch_s for p in points_with_pos]
@@ -353,7 +364,7 @@ def merge_streams_to_fit(
             MergeWarning(
                 code="gps_extrapolated",
                 message=(
-                    f"{extrapolated_count} of {len(records)} samples fell outside the Fitbit "
+                    f"{extrapolated_count} of {len(records)} samples fell outside the source "
                     "trackpoint time range; nearest-endpoint coordinates were used."
                 ),
             )

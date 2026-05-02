@@ -11,9 +11,10 @@ from pathlib import Path
 
 from app import jobs as jobs_mod
 from app import tokens as token_store
+from app.config import settings
 from app.db import init_db
-from app.fitbit import auth as fitbit_auth
-from app.fitbit.client import FitbitClient, FitbitNotConfigured
+from app.google_health import auth as google_auth
+from app.google_health.client import GoogleHealthClient, GoogleNotConfigured
 from app.merge import MergeError, merge_streams_to_fit
 from app.strava import auth as strava_auth
 from app.strava.client import StravaClient, StravaNotConfigured
@@ -87,36 +88,27 @@ async def _strava_streams(activity_id: int, out: str | None) -> int:
     return 0
 
 
-# ---------- Fitbit commands ----------
+# ---------- Google Health commands ----------
 
-async def _fitbit_login() -> int:
-    await init_db()
-    code, verifier = fitbit_auth.run_local_oauth_flow()
-    pair = await fitbit_auth.exchange_code(code, verifier)
-    await token_store.save("fitbit", pair)
-    expires = datetime.fromtimestamp(pair.expires_at, tz=timezone.utc).isoformat()
-    print(f"Fitbit authorized. Access token expires at {expires}.")
-    return 0
-
-
-async def _fitbit_list(after_date: str, limit: int) -> int:
+async def _google_list(after_date: str, before_date: str | None) -> int:
     try:
-        async with FitbitClient.open() as client:
-            activities = await client.list_activities(after_date=after_date, limit=limit)
-    except FitbitNotConfigured as e:
+        async with GoogleHealthClient.open() as client:
+            activities = await client.list_exercises(after_date=after_date, before_date=before_date)
+    except GoogleNotConfigured as e:
         print(str(e), file=sys.stderr)
         return 2
     for a in activities:
+        ex = a.get("exercise") or {}
+        interval = ex.get("interval") or {}
+        name = (a.get("name") or "").rsplit("/", 1)[-1]
         print(
-            f"{a.get('startTime', '')[:19]:20}  {a.get('logId'):>14}  "
-            f"{a.get('activityName', '')[:24]:24}  "
-            f"{(a.get('distance') or 0):6.2f}{a.get('distanceUnit', 'km')}  "
-            f"dur={a.get('duration', 0) // 1000}s"
+            f"{(interval.get('startTime') or '')[:19]:20}  {name:>20}  "
+            f"{ex.get('activityType', ''):14}"
         )
     return 0
 
 
-async def _fitbit_find_near(when_iso: str, window_minutes: int) -> int:
+async def _google_find_near(when_iso: str, window_minutes: int) -> int:
     try:
         when = datetime.fromisoformat(when_iso.replace("Z", "+00:00"))
     except ValueError:
@@ -124,29 +116,32 @@ async def _fitbit_find_near(when_iso: str, window_minutes: int) -> int:
         return 2
 
     try:
-        async with FitbitClient.open() as client:
+        async with GoogleHealthClient.open() as client:
             matches = await client.find_near(when, window_minutes=window_minutes)
-    except FitbitNotConfigured as e:
+    except GoogleNotConfigured as e:
         print(str(e), file=sys.stderr)
         return 2
 
     if not matches:
-        print(f"No Fitbit activities within +/- {window_minutes} min of {when_iso}")
+        print(f"No Google Health exercises within +/- {window_minutes} min of {when_iso}")
         return 0
     print(f"Found {len(matches)} match(es), closest first:")
     for a in matches:
+        ex = a.get("exercise") or {}
+        interval = ex.get("interval") or {}
+        name = (a.get("name") or "").rsplit("/", 1)[-1]
         print(
-            f"  {a.get('startTime', '')[:19]}  log_id={a.get('logId')}  "
-            f"{a.get('activityName', '')}  duration={a.get('duration', 0) // 1000}s"
+            f"  {(interval.get('startTime') or '')[:19]}  id={name}  "
+            f"type={ex.get('activityType', '')}"
         )
     return 0
 
 
-async def _fitbit_fetch_tcx(log_id: int, out: str | None) -> int:
+async def _google_fetch_tcx(data_point_id: str, out: str | None) -> int:
     try:
-        async with FitbitClient.open() as client:
-            tcx = await client.get_activity_tcx(log_id)
-    except FitbitNotConfigured as e:
+        async with GoogleHealthClient.open() as client:
+            tcx = await client.get_exercise_tcx(data_point_id)
+    except GoogleNotConfigured as e:
         print(str(e), file=sys.stderr)
         return 2
 
@@ -200,13 +195,13 @@ async def _merge(
 
 # ---------- Run-merge command (full pipeline via worker) ----------
 
-async def _run_merge(strava_id: int, fitbit_log_id: int | None, dry_run: bool) -> int:
+async def _run_merge(strava_id: int, external_id: str | None, dry_run: bool) -> int:
     from app.worker import run_merge_job
 
     await init_db()
     job_id = await jobs_mod.enqueue(
         strava_id,
-        fitbit_log_id=fitbit_log_id,
+        external_id=external_id,
         trigger="manual",
         dry_run=dry_run,
     )
@@ -236,7 +231,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # strava ---------------------------------------------------------------
     strava = sub.add_parser("strava", help="Strava CLI")
     strava_sub = strava.add_subparsers(dest="strava_cmd", required=True)
-    strava_sub.add_parser("login", help="Run OAuth flow via local listener on :8001")
+    strava_sub.add_parser("login", help="Run OAuth flow via local listener on :8001 (dev only)")
 
     p_list = strava_sub.add_parser("list", help="List recent activities")
     p_list.add_argument("--limit", type=int, default=20)
@@ -248,27 +243,26 @@ def _build_parser() -> argparse.ArgumentParser:
     p_streams.add_argument("activity_id", type=int)
     p_streams.add_argument("--out", help="Write to file instead of stdout")
 
-    # fitbit ---------------------------------------------------------------
-    fitbit = sub.add_parser("fitbit", help="Fitbit CLI")
-    fitbit_sub = fitbit.add_subparsers(dest="fitbit_cmd", required=True)
-    fitbit_sub.add_parser("login", help="Run OAuth (PKCE) via local listener on :8002")
+    # google ---------------------------------------------------------------
+    google = sub.add_parser("google", help="Google Health CLI")
+    google_sub = google.add_subparsers(dest="google_cmd", required=True)
 
-    p_fb_list = fitbit_sub.add_parser("list", help="List Fitbit activities after a date")
-    p_fb_list.add_argument("--after-date", required=True, help="YYYY-MM-DD")
-    p_fb_list.add_argument("--limit", type=int, default=20)
+    p_g_list = google_sub.add_parser("list", help="List exercises after a date")
+    p_g_list.add_argument("--after-date", required=True, help="YYYY-MM-DD")
+    p_g_list.add_argument("--before-date", help="YYYY-MM-DD (optional upper bound)")
 
-    p_fb_near = fitbit_sub.add_parser("find-near", help="Find Fitbit activities near an ISO datetime")
-    p_fb_near.add_argument("when", help="ISO-8601 timestamp, e.g. 2026-04-30T08:00:00Z")
-    p_fb_near.add_argument("--window-minutes", type=int, default=120)
+    p_g_near = google_sub.add_parser("find-near", help="Find exercises near an ISO datetime")
+    p_g_near.add_argument("when", help="ISO-8601 timestamp, e.g. 2026-04-30T08:00:00Z")
+    p_g_near.add_argument("--window-minutes", type=int, default=120)
 
-    p_fb_tcx = fitbit_sub.add_parser("fetch-tcx", help="Download a Fitbit activity as TCX")
-    p_fb_tcx.add_argument("log_id", type=int)
-    p_fb_tcx.add_argument("--out", help="Write to file (default: stdout, binary)")
+    p_g_tcx = google_sub.add_parser("fetch-tcx", help="Download an exercise as TCX bytes")
+    p_g_tcx.add_argument("data_point_id", help="Numeric id, or full users/.../dataPoints/<id>")
+    p_g_tcx.add_argument("--out", help="Write to file (default: stdout, binary)")
 
     # merge ----------------------------------------------------------------
     p_merge = sub.add_parser("merge", help="Merge streams JSON + TCX -> FIT (no API calls)")
     p_merge.add_argument("--strava-streams", required=True, help="JSON file from `stravafit strava streams`")
-    p_merge.add_argument("--fitbit-tcx", required=True, help="TCX file from `stravafit fitbit fetch-tcx`")
+    p_merge.add_argument("--fitbit-tcx", required=True, help="TCX file (from `google fetch-tcx`)")
     p_merge.add_argument("--start-time", required=True, help="ISO-8601 UTC start of the Strava activity")
     p_merge.add_argument("--out", required=True, help="Path to write merged.fit")
     p_merge.add_argument("--name", default="Merged ride")
@@ -276,11 +270,11 @@ def _build_parser() -> argparse.ArgumentParser:
     # run-merge ------------------------------------------------------------
     p_run = sub.add_parser(
         "run-merge",
-        help="Run the full merge pipeline (Strava + Fitbit + upload) for an activity ID",
+        help="Run the full merge pipeline (Strava + Google Health + upload) for an activity ID",
     )
     p_run.add_argument("strava_id", type=int)
-    p_run.add_argument("--fitbit-log-id", type=int, default=None,
-                       help="Force a specific Fitbit log id (skips auto-match)")
+    p_run.add_argument("--external-id", default=None,
+                       help="Force a specific Google Health exercise data-point id (skips auto-match)")
     p_run.add_argument("--dry-run", action="store_true",
                        help="Produce the merged FIT but do NOT delete/upload to Strava")
 
@@ -306,15 +300,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.strava_cmd == "streams":
             return asyncio.run(_strava_streams(args.activity_id, args.out))
 
-    if args.cmd == "fitbit":
-        if args.fitbit_cmd == "login":
-            return asyncio.run(_fitbit_login())
-        if args.fitbit_cmd == "list":
-            return asyncio.run(_fitbit_list(args.after_date, args.limit))
-        if args.fitbit_cmd == "find-near":
-            return asyncio.run(_fitbit_find_near(args.when, args.window_minutes))
-        if args.fitbit_cmd == "fetch-tcx":
-            return asyncio.run(_fitbit_fetch_tcx(args.log_id, args.out))
+    if args.cmd == "google":
+        if args.google_cmd == "list":
+            return asyncio.run(_google_list(args.after_date, args.before_date))
+        if args.google_cmd == "find-near":
+            return asyncio.run(_google_find_near(args.when, args.window_minutes))
+        if args.google_cmd == "fetch-tcx":
+            return asyncio.run(_google_fetch_tcx(args.data_point_id, args.out))
 
     if args.cmd == "merge":
         return asyncio.run(_merge(
@@ -322,7 +314,7 @@ def main(argv: list[str] | None = None) -> int:
         ))
 
     if args.cmd == "run-merge":
-        return asyncio.run(_run_merge(args.strava_id, args.fitbit_log_id, args.dry_run))
+        return asyncio.run(_run_merge(args.strava_id, args.external_id, args.dry_run))
 
     parser.print_help()
     return 0

@@ -6,7 +6,7 @@ from typing import Literal
 
 from app.db import connect
 
-Service = Literal["strava", "fitbit"]
+Service = Literal["strava", "google"]
 
 
 @dataclass(frozen=True)

@@ -123,7 +123,7 @@ async def _dispatch(strava_id: int) -> None:
         bound.info("webhook.skip", reason="loop_marker_present")
         await jobs.record_processed(
             strava_id,
-            fitbit_log_id=None,
+            external_id=None,
             result="skipped:self_upload",
             notes="LOOP_MARKER detected in description",
         )
@@ -140,7 +140,7 @@ async def _dispatch(strava_id: int) -> None:
         bound.info("webhook.kill_switch_off", action="pending_manual_review")
         await jobs.record_processed(
             strava_id,
-            fitbit_log_id=None,
+            external_id=None,
             result="pending_manual_review",
             notes="auto_merge_enabled=false; review in dashboard",
         )
