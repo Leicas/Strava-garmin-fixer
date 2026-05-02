@@ -1,0 +1,35 @@
+# Komodo Stack variant. Komodo resolves `[[SECRET_NAME]]` server-side from
+# Komodo Secrets at deploy time, which plain `docker compose` does not — that's
+# why this is split out from compose.yaml.
+#
+# Configure these as Komodo Secrets (or Variables) before deploying:
+#   STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET,
+#   FITBIT_CLIENT_ID, FITBIT_CLIENT_SECRET,
+#   VERIFY_TOKEN
+# and a Variable PUBLIC_BASE_URL pointing at your tunnel hostname.
+
+services:
+  stravafit:
+    image: ghcr.io/${GITHUB_OWNER:-you}/stravafit:latest
+    container_name: stravafit
+    restart: unless-stopped
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://stravafit.example.com}
+      DATABASE_PATH: /data/state.db
+      IN_CONTAINER: "1"
+      STRAVA_CLIENT_ID:     "[[STRAVA_CLIENT_ID]]"
+      STRAVA_CLIENT_SECRET: "[[STRAVA_CLIENT_SECRET]]"
+      FITBIT_CLIENT_ID:     "[[FITBIT_CLIENT_ID]]"
+      FITBIT_CLIENT_SECRET: "[[FITBIT_CLIENT_SECRET]]"
+      VERIFY_TOKEN:         "[[VERIFY_TOKEN]]"
+    volumes:
+      - ./data:/data
+    ports:
+      # Loopback only — Cloudflare Tunnel (or equivalent) handles HTTPS ingress.
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3

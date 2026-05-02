@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Manual merge — StravaFit{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-semibold mb-4">Manual merge</h1>
+<p class="text-sm opacity-70 mb-4">
+  Use this when the auto-detection rule didn't fire (e.g., a ride that has full GPS already
+  but you want to swap in Fitbit's GPS for some reason). Submitting opens the preview page.
+</p>
+
+<form action="/manual" method="post" class="card bg-base-100 shadow">
+  <div class="card-body grid sm:grid-cols-2 gap-4">
+    <label class="form-control">
+      <div class="label"><span class="label-text">Strava activity ID</span></div>
+      <input type="number" name="strava_id" required class="input input-bordered" placeholder="e.g. 12345678901">
+    </label>
+    <label class="form-control">
+      <div class="label"><span class="label-text">Fitbit log ID</span></div>
+      <input type="number" name="fitbit_log_id" required class="input input-bordered" placeholder="e.g. 88112233">
+    </label>
+    <div class="sm:col-span-2 flex justify-end">
+      <button class="btn btn-primary" type="submit">Open preview</button>
+    </div>
+  </div>
+</form>
+{% endblock %}

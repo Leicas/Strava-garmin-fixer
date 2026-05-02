@@ -1,0 +1,24 @@
+{% if error %}
+  <div class="alert alert-error text-sm"><span>{{ error }}</span></div>
+{% elif not matches %}
+  <div class="alert alert-warning text-sm"><span>No Fitbit activities within ±2h of the Strava start.</span></div>
+{% else %}
+  <table class="table table-zebra table-sm">
+    <thead>
+      <tr><th>Started</th><th>Name</th><th>Log ID</th><th>Duration</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for m in matches %}
+      <tr>
+        <td class="whitespace-nowrap">{{ (m.startTime or "")[:19] }}</td>
+        <td>{{ m.activityName or "" }}</td>
+        <td class="font-mono">{{ m.logId }}</td>
+        <td class="tabular-nums">{{ (m.duration or 0) // 1000 }}s</td>
+        <td>
+          <a class="btn btn-primary btn-xs" href="/preview/{{ strava_id }}/{{ m.logId }}">Preview</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}

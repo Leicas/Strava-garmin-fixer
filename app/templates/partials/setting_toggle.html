@@ -1,0 +1,6 @@
+<form hx-post="/settings/toggle" hx-swap="outerHTML" class="inline">
+  <input type="hidden" name="key" value="{{ key }}">
+  <button type="submit" class="btn btn-sm {% if value %}btn-success{% else %}btn-ghost btn-outline{% endif %}">
+    {{ "ON" if value else "OFF" }}
+  </button>
+</form>

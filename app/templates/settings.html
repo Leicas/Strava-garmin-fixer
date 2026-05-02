@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Settings — StravaFit{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-semibold mb-4">Settings</h1>
+
+{% if flash_connected %}
+  <div class="alert alert-success mb-4">
+    <span><strong>{{ flash_connected|capitalize }}</strong> connected.</span>
+  </div>
+{% endif %}
+{% if flash_error %}
+  <div class="alert alert-error mb-4">
+    <span>OAuth failed: <code>{{ flash_error }}</code></span>
+  </div>
+{% endif %}
+
+<div class="grid md:grid-cols-2 gap-4">
+
+  <div class="card bg-base-100 shadow md:col-span-2">
+    <div class="card-body">
+      <h2 class="card-title">Connections</h2>
+      <p class="text-sm opacity-70">
+        OAuth happens through this app — no shell access required. Each provider
+        redirects back to a callback URL on this server, which must match what
+        you registered with the provider.
+      </p>
+
+      <table class="table">
+        <thead>
+          <tr><th>Provider</th><th>Status</th><th>Token expiry</th><th></th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              <div class="font-semibold">Strava</div>
+              <div class="text-xs opacity-60">Callback: <code>{{ "{}/auth/strava/callback".format(request.base_url|string|trim('/')) }}</code></div>
+              <div class="text-xs opacity-60">Register Authorization Callback Domain: just the host (e.g. <code>{{ request.url.hostname }}</code>)</div>
+            </td>
+            <td>
+              {% if strava_connected %}
+                <span class="badge badge-success">connected</span>
+                {% if strava_expired %}<span class="badge badge-warning ml-1">stale</span>{% endif %}
+              {% else %}
+                <span class="badge badge-ghost">not connected</span>
+              {% endif %}
+            </td>
+            <td class="text-xs">{{ strava_expires_at or "—" }}</td>
+            <td>
+              <a class="btn btn-sm {% if strava_connected %}btn-outline{% else %}btn-primary{% endif %}"
+                 href="/auth/strava/start">
+                {{ "Reconnect" if strava_connected else "Connect Strava" }}
+              </a>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <div class="font-semibold">Fitbit</div>
+              <div class="text-xs opacity-60">Redirect URI: <code>{{ "{}/auth/fitbit/callback".format(request.base_url|string|trim('/')) }}</code></div>
+              <div class="text-xs opacity-60">App type must be <strong>Personal</strong>; the redirect URI above must match exactly.</div>
+            </td>
+            <td>
+              {% if fitbit_connected %}
+                <span class="badge badge-success">connected</span>
+                {% if fitbit_expired %}<span class="badge badge-warning ml-1">stale</span>{% endif %}
+              {% else %}
+                <span class="badge badge-ghost">not connected</span>
+              {% endif %}
+            </td>
+            <td class="text-xs">{{ fitbit_expires_at or "—" }}</td>
+            <td>
+              <a class="btn btn-sm {% if fitbit_connected %}btn-outline{% else %}btn-primary{% endif %}"
+                 href="/auth/fitbit/start">
+                {{ "Reconnect" if fitbit_connected else "Connect Fitbit" }}
+              </a>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="text-xs opacity-60 mt-2">Tokens auto-refresh on use. "stale" means the access token is past its expiry — the next call will refresh it transparently.</p>
+    </div>
+  </div>
+
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title">Auto-merge</h2>
+      <p class="text-sm opacity-70">
+        When ON, Strava webhook events trigger an automatic merge for matching rides.
+        When OFF, they create a <code>pending_manual_review</code> row instead so you can approve from the dashboard.
+      </p>
+      <div class="flex items-center justify-between mt-2">
+        <div>
+          <div class="font-semibold">Auto-merge enabled</div>
+          <div class="text-xs opacity-70">The kill switch.</div>
+        </div>
+        {% with key="auto_merge_enabled", value=auto_merge_enabled %}
+          {% include "partials/setting_toggle.html" %}
+        {% endwith %}
+      </div>
+      <div class="flex items-center justify-between mt-3">
+        <div>
+          <div class="font-semibold">Default to dry-run</div>
+          <div class="text-xs opacity-70">Currently advisory; per-job dry-run is set when invoking the merge.</div>
+        </div>
+        {% with key="default_dry_run", value=default_dry_run %}
+          {% include "partials/setting_toggle.html" %}
+        {% endwith %}
+      </div>
+    </div>
+  </div>
+
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title">Webhook subscription</h2>
+      <p class="text-sm opacity-70">Strava push subscriptions are managed via the bootstrap script:</p>
+      <pre class="bg-base-300 p-3 rounded text-xs"><code>docker compose exec stravafit \
+  uv run python -m scripts.bootstrap_subscription ensure</code></pre>
+      <p class="text-xs opacity-70">
+        Callback URL: <code>{{ "{}/webhook/strava".format(request.base_url|string|trim('/')) }}</code>
+        — must be reachable over HTTPS for Strava to deliver events.
+      </p>
+    </div>
+  </div>
+
+</div>
+{% endblock %}

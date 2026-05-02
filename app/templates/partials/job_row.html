@@ -1,0 +1,23 @@
+<tr id="job-{{ job.id }}"
+    {% if job.status in ("queued","running") %}
+      hx-get="/jobs/{{ job.id }}"
+      hx-trigger="every 2s"
+      hx-swap="outerHTML"
+    {% endif %}>
+  <td class="font-mono">{{ job.id }}</td>
+  <td>
+    <a href="/activity/{{ job.strava_id }}" class="link">{{ job.strava_id }}</a>
+    {% if job.dry_run %}<span class="badge badge-ghost badge-xs ml-1">dry</span>{% endif %}
+  </td>
+  <td>{{ job.trigger }}</td>
+  <td><span class="badge {{ job.status_badge.css }}">{{ job.status_badge.label }}</span></td>
+  <td class="text-xs">{{ job.started }}</td>
+  <td class="text-xs">{{ job.finished }}</td>
+  {% if job.error %}<td class="text-xs text-error">{{ job.error[:80] }}</td>{% else %}<td></td>{% endif %}
+</tr>
+{% if job.log %}
+<tr id="job-{{ job.id }}-log">
+  <td></td>
+  <td colspan="6"><pre class="text-[10px] bg-base-300 p-2 rounded whitespace-pre-wrap">{{ job.log }}</pre></td>
+</tr>
+{% endif %}

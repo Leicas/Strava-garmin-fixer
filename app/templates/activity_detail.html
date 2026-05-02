@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Activity {{ strava_id }} — StravaFit{% endblock %}
+
+{% block content %}
+<div class="flex items-center gap-3 mb-4">
+  <a href="/" class="btn btn-ghost btn-sm">← Activities</a>
+  <h1 class="text-2xl font-semibold">Activity {{ strava_id }}</h1>
+  <span class="badge {{ badge.css }}">{{ badge.label }}</span>
+  <a class="btn btn-ghost btn-sm ml-auto" target="_blank"
+     href="https://www.strava.com/activities/{{ strava_id }}">Open on Strava ↗</a>
+</div>
+
+{% if error %}
+  <div class="alert alert-error mb-4"><span>{{ error }}</span></div>
+{% endif %}
+
+{% if activity %}
+<div class="grid md:grid-cols-2 gap-4">
+
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title">{{ activity.name or "(unnamed)" }}</h2>
+      <div class="text-sm space-y-1">
+        <div><span class="opacity-70">Started:</span> {{ activity_started_at }}</div>
+        <div><span class="opacity-70">Type:</span> {{ activity.type }}</div>
+        <div><span class="opacity-70">Distance:</span> {{ "%.2f"|format(activity_distance_km) }} km</div>
+        <div><span class="opacity-70">Moving time:</span> {{ activity_moving }}</div>
+        <div><span class="opacity-70">Device:</span> <code>{{ activity.device_name or "—" }}</code></div>
+        <div><span class="opacity-70">Avg HR:</span> {{ activity.average_heartrate or "—" }}</div>
+        <div><span class="opacity-70">Avg cadence:</span> {{ activity.average_cadence or "—" }}</div>
+        <div><span class="opacity-70">Avg temp:</span> {{ activity.average_temp or "—" }}</div>
+      </div>
+      {% if processed %}
+        <div class="alert alert-info mt-3 text-xs">
+          Last processed: <code>{{ processed.result }}</code>
+          {% if processed.fitbit_log_id %}(fitbit_log_id={{ processed.fitbit_log_id }}){% endif %}
+          {% if processed.notes %} — {{ processed.notes }}{% endif %}
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title">Streams</h2>
+      <table class="table table-xs">
+        <thead><tr><th>key</th><th class="text-right">n</th><th>type</th><th>res</th></tr></thead>
+        <tbody>
+          {% for s in stream_summary %}
+            <tr><td>{{ s.key }}</td><td class="text-right tabular-nums">{{ s.n }}</td><td>{{ s.type }}</td><td>{{ s.resolution }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="card bg-base-100 shadow mt-4">
+  <div class="card-body">
+    <h2 class="card-title">Find Fitbit match</h2>
+    <p class="text-sm opacity-70">±2 hours of <code>{{ activity.start_date }}</code></p>
+    <button class="btn btn-primary btn-sm w-fit"
+            hx-get="/activity/{{ strava_id }}/_fitbit_matches"
+            hx-target="#fitbit-matches"
+            hx-swap="innerHTML">
+      Search
+    </button>
+    <div id="fitbit-matches" class="mt-3"></div>
+  </div>
+</div>
+
+<div class="card bg-base-100 shadow mt-4">
+  <div class="card-body">
+    <h2 class="card-title">Run merge</h2>
+    <p class="text-sm opacity-70">Always preview first if you can. The merge is deterministic — same inputs → same FIT.</p>
+
+    <div class="flex flex-wrap gap-2 mt-2">
+      <form hx-post="/activity/{{ strava_id }}/merge" hx-target="#last-job" hx-swap="innerHTML">
+        <input type="hidden" name="dry_run" value="true">
+        <button class="btn btn-outline btn-warning btn-sm" type="submit">Auto-match + DRY RUN</button>
+      </form>
+
+      <form hx-post="/activity/{{ strava_id }}/merge" hx-target="#last-job" hx-swap="innerHTML"
+            hx-confirm="Delete the original Strava activity and replace it with the merged version?">
+        <button class="btn btn-error btn-sm" type="submit">Auto-match + REPLACE</button>
+      </form>
+    </div>
+
+    <div class="mt-4">
+      <h3 class="font-semibold text-sm">Last submitted job</h3>
+      <table class="table table-xs">
+        <tbody id="last-job"><tr><td class="opacity-50" colspan="6">No job submitted yet from this page.</td></tr></tbody>
+      </table>
+      <a href="/jobs" class="link text-xs">All jobs →</a>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

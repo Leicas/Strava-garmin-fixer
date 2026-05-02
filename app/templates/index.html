@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-2xl font-semibold">Activities</h1>
+  {% if connected %}
+    <span class="badge badge-success badge-outline">Strava connected</span>
+  {% else %}
+    <span class="badge badge-warning badge-outline">Not connected</span>
+  {% endif %}
+</div>
+
+{% if not connected %}
+  <div class="alert alert-warning">
+    <div>
+      <h3 class="font-bold">Strava not connected</h3>
+      <p class="text-sm mt-1">Connect your Strava account from <a href="/settings" class="link link-primary">Settings</a>.</p>
+      <p class="text-xs opacity-70 mt-1">
+        Make sure <code>STRAVA_CLIENT_ID</code> and <code>STRAVA_CLIENT_SECRET</code>
+        are set in the deploy env first.
+      </p>
+    </div>
+  </div>
+{% elif error %}
+  <div class="alert alert-error">
+    <div>
+      <h3 class="font-bold">Couldn't list activities</h3>
+      <p class="text-sm mt-1">{{ error }}</p>
+    </div>
+  </div>
+{% elif not activities %}
+  <div class="alert">
+    <span>No activities returned. Try going for a ride first.</span>
+  </div>
+{% else %}
+  <div class="overflow-x-auto bg-base-100 rounded-lg shadow">
+    <table class="table table-zebra">
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Name</th>
+          <th>Type</th>
+          <th class="text-right">Distance</th>
+          <th class="text-right">Moving</th>
+          <th>Device</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in activities %}
+        <tr>
+          <td class="whitespace-nowrap">{{ a.start }}</td>
+          <td>
+            <a class="link link-hover" href="/activity/{{ a.id }}">{{ a.name }}</a>
+            <a class="link link-hover opacity-50 ml-2" href="https://www.strava.com/activities/{{ a.id }}" target="_blank" title="Open on Strava">↗</a>
+          </td>
+          <td>{{ a.type }}</td>
+          <td class="text-right tabular-nums">{{ "%.2f"|format(a.distance_km) }} km</td>
+          <td class="text-right tabular-nums">{{ a.moving_time }}</td>
+          <td class="text-xs opacity-70">{{ a.device_name }}</td>
+          <td><span class="badge {{ a.badge.css }}">{{ a.badge.label }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+{% endblock %}

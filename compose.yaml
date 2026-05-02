@@ -1,0 +1,39 @@
+# StravaFit — local Docker run.
+#
+# Quick start:
+#   1. cp .env.example .env  (then fill in OAuth creds + PUBLIC_BASE_URL)
+#   2. docker compose build
+#   3. docker compose up -d
+#   4. open http://localhost:8000/settings and click "Connect Strava" / "Connect Fitbit"
+#
+# All OAuth happens in the dashboard — no shell access needed. The provider
+# redirects back to {PUBLIC_BASE_URL}/auth/<service>/callback, so the URL must
+# be registered with the provider AND must match what the container can be
+# reached at from the user's browser. For pure-localhost dev, set
+# PUBLIC_BASE_URL=http://localhost:8000.
+#
+# For Komodo deployment, see compose.komodo.yaml.
+
+services:
+  stravafit:
+    build: .
+    image: stravafit:latest
+    container_name: stravafit
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /data/state.db
+      IN_CONTAINER: "1"
+    volumes:
+      - ./data:/data
+    ports:
+      # Web UI + webhook receiver + OAuth callbacks. Bound to loopback —
+      # your tunnel (Cloudflare Tunnel, Tailscale Funnel, etc.) handles ingress.
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
