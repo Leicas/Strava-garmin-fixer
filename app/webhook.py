@@ -147,7 +147,7 @@ async def _dispatch(strava_id: int) -> None:
         return
 
     # Enqueue + run.
-    job_id = await jobs.enqueue(strava_id, trigger="webhook", dry_run=False)
+    job_id = await jobs.enqueue(strava_id, trigger="webhook", mode=jobs.MODE_AUTO)
     bound.info("webhook.enqueued", job_id=job_id)
     try:
         await run_merge_job(job_id)

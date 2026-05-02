@@ -56,7 +56,9 @@
         <tr>
           <td class="whitespace-nowrap">{{ (interval.startTime or '')[:19] }}</td>
           <td>{{ ex.activityType or '' }}</td>
-          <td class="font-mono text-xs">{{ dpid }}</td>
+          <td class="font-mono text-xs">
+            <a class="link" href="/google/exercise/{{ dpid }}">{{ dpid }}</a>
+          </td>
           <td class="text-xs opacity-70">
             {% if interval.startTime and interval.endTime %}
               {{ interval.startTime[:19] }} → {{ interval.endTime[:19] }}

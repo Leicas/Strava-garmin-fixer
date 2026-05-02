@@ -7,27 +7,45 @@ from app.db import connect
 
 LOOP_MARKER: str = "[merged-by-stravafit]"
 
+MODE_DRY_RUN = "dry_run"
+MODE_AUTO = "auto"
+MODE_SEMI_AUTO = "semi_auto"
+_VALID_MODES = (MODE_DRY_RUN, MODE_AUTO, MODE_SEMI_AUTO)
+
 
 async def enqueue(
     strava_id: int,
     *,
     external_id: str | None = None,
     trigger: str,
-    dry_run: bool = False,
+    mode: str = MODE_AUTO,
 ) -> int:
     """Insert a queued job and return its id."""
+    if mode not in _VALID_MODES:
+        raise ValueError(f"invalid mode {mode!r}, want one of {_VALID_MODES}")
+    dry_run_legacy = 1 if mode == MODE_DRY_RUN else 0
     async with connect() as db:
         cursor = await db.execute(
             """
-            INSERT INTO jobs (strava_id, external_id, trigger, status, dry_run, log)
-            VALUES (?, ?, ?, 'queued', ?, '')
+            INSERT INTO jobs (strava_id, external_id, trigger, status, dry_run, mode, log)
+            VALUES (?, ?, ?, 'queued', ?, ?, '')
             """,
-            (strava_id, external_id, trigger, 1 if dry_run else 0),
+            (strava_id, external_id, trigger, dry_run_legacy, mode),
         )
         await db.commit()
         job_id = cursor.lastrowid
     assert job_id is not None
     return int(job_id)
+
+
+async def set_status(job_id: int, status: str) -> None:
+    """Set an arbitrary job status. Used for transitions like 'awaiting_delete'."""
+    async with connect() as db:
+        await db.execute(
+            "UPDATE jobs SET status = ? WHERE id = ?",
+            (status, job_id),
+        )
+        await db.commit()
 
 
 async def mark_running(job_id: int) -> None:

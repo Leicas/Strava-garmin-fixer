@@ -46,12 +46,13 @@ async def run_merge_job(job_id: int) -> None:
 
     strava_id = int(job["strava_id"])
     external_id_in: str | None = job["external_id"] if job["external_id"] is not None else None
-    dry_run = bool(job["dry_run"])
+    mode = job.get("mode") or (jobs.MODE_DRY_RUN if job.get("dry_run") else jobs.MODE_AUTO)
+    dry_run = mode == jobs.MODE_DRY_RUN
 
-    bound = log.bind(job_id=job_id, strava_id=strava_id, dry_run=dry_run)
+    bound = log.bind(job_id=job_id, strava_id=strava_id, mode=mode)
     bound.info("worker.start")
     await jobs.mark_running(job_id)
-    await jobs.append_log(job_id, f"start strava_id={strava_id} dry_run={dry_run}")
+    await jobs.append_log(job_id, f"start strava_id={strava_id} mode={mode}")
 
     activity: dict[str, Any]
     streams: dict[str, Any]
@@ -147,7 +148,17 @@ async def run_merge_job(job_id: int) -> None:
         for w in warnings:
             await jobs.append_log(job_id, f"warning: {w}")
 
-        if dry_run:
+        # Always save the merged bytes to disk — used by semi-auto pause,
+        # by /preview/.../download.fit (separate path), and as the recovery
+        # safety net for auto-replace.
+        recovery_dir = Path(settings.database_path).parent / "recovery"
+        recovery_dir.mkdir(parents=True, exist_ok=True)
+        recovery_path = recovery_dir / f"strava-{strava_id}-{int(time.time())}.fit"
+        recovery_path.write_bytes(result.fit_bytes)
+        await jobs.set_recovery_path(job_id, str(recovery_path))
+        await _say(job_id, "recovery.saved", path=str(recovery_path))
+
+        if mode == jobs.MODE_DRY_RUN:
             await jobs.append_log(
                 job_id,
                 f"dry-run: produced {n_bytes} bytes, {len(warnings)} warnings",
@@ -161,21 +172,26 @@ async def run_merge_job(job_id: int) -> None:
             await jobs.mark_success(job_id)
             return
 
+        if mode == jobs.MODE_SEMI_AUTO:
+            # Pause here. The user is expected to delete the original on
+            # Strava's web UI (since API DELETE is unreliable), then click
+            # "Upload now" on /jobs which calls resume_upload(job_id).
+            await jobs.append_log(
+                job_id,
+                f"semi-auto: merged FIT ready ({n_bytes} bytes). "
+                f"Delete the original on Strava, then click 'Upload now'.",
+            )
+            await jobs.set_status(job_id, "awaiting_delete")
+            await _say(job_id, "worker.awaiting_delete", strava_id=strava_id)
+            return
+
+        # mode == MODE_AUTO: full automated delete + upload.
         # Strava's content-duplicate detection rejects an upload whose start
         # time matches an existing activity, so we MUST delete the original
-        # before uploading the merged file. To make that safe, we save the
-        # merged bytes to disk first; if any step in the replace fails, the
-        # user can recover via /jobs/{id}/recovery.fit and upload manually.
+        # before uploading. The recovery file above is the safety net.
         base_desc = activity.get("description") or ""
         new_desc = f"{base_desc} {jobs.LOOP_MARKER}".strip()
         original_name = activity.get("name")
-
-        recovery_dir = Path(settings.database_path).parent / "recovery"
-        recovery_dir.mkdir(parents=True, exist_ok=True)
-        recovery_path = recovery_dir / f"strava-{strava_id}-{int(time.time())}.fit"
-        recovery_path.write_bytes(result.fit_bytes)
-        await jobs.set_recovery_path(job_id, str(recovery_path))
-        await _say(job_id, "recovery.saved", path=str(recovery_path))
 
         try:
             async with StravaClient.open() as sc:
@@ -253,3 +269,97 @@ async def run_merge_job(job_id: int) -> None:
             )
         except Exception:  # noqa: BLE001 - last-ditch
             bound.exception("worker.failed_to_record_failure")
+
+
+async def resume_upload(job_id: int) -> None:
+    """Finish a semi-auto job: read the merged FIT off disk and upload to
+    Strava. Called by POST /jobs/{id}/finish-upload after the user has
+    deleted the original on Strava's web UI. Must not raise."""
+    job = await jobs.get(job_id)
+    if job is None:
+        log.warning("worker.resume_missing", job_id=job_id)
+        return
+    if job["status"] != "awaiting_delete":
+        log.warning("worker.resume_wrong_status", job_id=job_id, status=job["status"])
+        return
+    rp_str = job.get("recovery_path")
+    if not rp_str:
+        await jobs.mark_error(job_id, "resume_failed: no recovery_path")
+        return
+    rp = Path(rp_str)
+    if not rp.is_file():
+        await jobs.mark_error(job_id, f"resume_failed: recovery file missing at {rp}")
+        return
+
+    strava_id = int(job["strava_id"])
+    chosen_external_id = job.get("external_id")
+    bound = log.bind(job_id=job_id, strava_id=strava_id)
+    bound.info("worker.resume.start")
+    await jobs.set_status(job_id, "running")
+    await jobs.append_log(job_id, "resume: uploading merged FIT")
+
+    try:
+        fit_bytes = rp.read_bytes()
+        async with StravaClient.open() as sc:
+            # Best-effort: pull the original name/description for the new upload.
+            original_name: str | None = None
+            base_desc = ""
+            try:
+                act = await sc.get_activity(strava_id)
+                original_name = act.get("name")
+                base_desc = act.get("description") or ""
+            except Exception:  # noqa: BLE001 - if 404 (already deleted) just continue
+                await _say(job_id, "strava.original_lookup_failed",
+                           note="probably already deleted, continuing")
+
+            new_desc = f"{base_desc} {jobs.LOOP_MARKER}".strip()
+
+            await _say(job_id, "strava.upload", bytes=len(fit_bytes))
+            resp = await sc.upload(
+                fit_bytes,
+                data_type="fit",
+                name=original_name,
+                description=new_desc,
+                external_id=f"stravafit-{strava_id}",
+            )
+            upload_id = int(resp["id"])
+            await _say(job_id, "strava.upload_submitted", upload_id=upload_id)
+            final = await sc.wait_for_upload(upload_id, timeout_s=120, poll_s=3)
+            new_id = int(final["activity_id"])
+            await _say(job_id, "strava.upload_finished", new_activity_id=new_id)
+
+            if original_name:
+                try:
+                    await sc.update_activity(new_id, name=original_name)
+                    await _say(job_id, "strava.name_restored", name=original_name)
+                except Exception as ne:  # noqa: BLE001 - non-fatal touch-up
+                    await _say(job_id, "strava.name_restore_failed", err=str(ne))
+    except Exception as exc:  # noqa: BLE001 - surface in job state
+        await _say(job_id, "strava.resume_failed", err=str(exc))
+        bound.error("worker.resume_failed", err=str(exc))
+        await jobs.append_log(
+            job_id,
+            f"RECOVERY: merged FIT is still on disk. Most likely cause: "
+            f"the original wasn't actually deleted yet (Strava dedup), or "
+            f"a transient API error. Click 'Upload now' again to retry, or "
+            f"download the recovery FIT and upload manually via Strava UI.",
+        )
+        # Keep status as awaiting_delete so the user can retry from the UI.
+        await jobs.set_status(job_id, "awaiting_delete")
+        return
+
+    # Success: clean up the recovery file.
+    try:
+        rp.unlink(missing_ok=True)
+        await jobs.set_recovery_path(job_id, None)
+    except OSError as ce:
+        await _say(job_id, "recovery.cleanup_failed", err=str(ce))
+
+    await jobs.record_processed(
+        strava_id,
+        external_id=chosen_external_id,
+        result="success",
+        notes=f"new_id={new_id}",
+    )
+    await jobs.mark_success(job_id)
+    await _say(job_id, "worker.resume.done", new_activity_id=new_id)

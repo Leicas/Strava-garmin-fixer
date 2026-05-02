@@ -233,7 +233,7 @@ async def _run_merge(strava_id: int, external_id: str | None, dry_run: bool) -> 
         strava_id,
         external_id=external_id,
         trigger="manual",
-        dry_run=dry_run,
+        mode=jobs_mod.MODE_DRY_RUN if dry_run else jobs_mod.MODE_AUTO,
     )
     print(f"enqueued job {job_id} (strava_id={strava_id}, dry_run={dry_run})")
     await run_merge_job(job_id)

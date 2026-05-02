@@ -22,8 +22,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     strava_id     INTEGER NOT NULL,
     external_id   TEXT,                        -- source data point id
     trigger       TEXT NOT NULL,               -- 'webhook' | 'manual' | 'preview'
-    status        TEXT NOT NULL,               -- 'queued' | 'running' | 'success' | 'error'
-    dry_run       INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL,               -- 'queued' | 'running' | 'awaiting_delete' | 'success' | 'error'
+    dry_run       INTEGER NOT NULL DEFAULT 0,  -- legacy boolean kept for back-compat
+    mode          TEXT NOT NULL DEFAULT 'auto',-- 'dry_run' | 'auto' | 'semi_auto'
     started_at    INTEGER,
     finished_at   INTEGER,
     error         TEXT,

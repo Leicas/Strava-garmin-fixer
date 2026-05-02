@@ -7,7 +7,9 @@
   <td class="font-mono">{{ job.id }}</td>
   <td>
     <a href="/activity/{{ job.strava_id }}" class="link">{{ job.strava_id }}</a>
-    {% if job.dry_run %}<span class="badge badge-ghost badge-xs ml-1">dry</span>{% endif %}
+    {% if job.mode == "dry_run" %}<span class="badge badge-ghost badge-xs ml-1">dry</span>
+    {% elif job.mode == "semi_auto" %}<span class="badge badge-info badge-outline badge-xs ml-1">semi</span>
+    {% endif %}
   </td>
   <td>{{ job.trigger }}</td>
   <td><span class="badge {{ job.status_badge.css }}">{{ job.status_badge.label }}</span></td>
@@ -15,13 +17,50 @@
   <td class="text-xs">{{ job.finished }}</td>
   <td class="text-xs">
     {% if job.error %}<span class="text-error">{{ job.error[:80] }}</span>{% endif %}
-    {% if job.has_recovery %}
+    {% if job.has_recovery and not job.awaiting_delete %}
       <a class="btn btn-warning btn-xs ml-1" href="/jobs/{{ job.id }}/recovery.fit" download>
         Download recovery FIT
       </a>
     {% endif %}
   </td>
 </tr>
+{% if job.awaiting_delete %}
+<tr id="job-{{ job.id }}-pause" class="bg-base-200">
+  <td></td>
+  <td colspan="6">
+    <div class="flex flex-col gap-2 p-2">
+      <p class="text-sm">
+        <strong>Merged FIT is ready.</strong> To finish:
+      </p>
+      <ol class="list-decimal ml-5 text-sm space-y-1">
+        <li>
+          <a class="link link-primary"
+             href="https://www.strava.com/activities/{{ job.strava_id }}"
+             target="_blank" rel="noopener">
+            Open the original on Strava ↗
+          </a>
+          → click the <code>...</code> menu → <strong>Delete</strong>.
+        </li>
+        <li>
+          Once Strava shows it's gone, click below to auto-upload the merged version:
+        </li>
+      </ol>
+      <div class="flex gap-2">
+        <form hx-post="/jobs/{{ job.id }}/finish-upload"
+              hx-target="#job-{{ job.id }}"
+              hx-swap="outerHTML">
+          <button class="btn btn-success btn-sm" type="submit">
+            I've deleted it — upload now
+          </button>
+        </form>
+        <a class="btn btn-warning btn-sm" href="/jobs/{{ job.id }}/recovery.fit" download>
+          Download merged FIT (manual upload)
+        </a>
+      </div>
+    </div>
+  </td>
+</tr>
+{% endif %}
 {% if job.log %}
 <tr id="job-{{ job.id }}-log">
   <td></td>

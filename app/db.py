@@ -30,6 +30,17 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE jobs ADD COLUMN recovery_path TEXT")
         except aiosqlite.OperationalError:
             pass
+        # Migration: add jobs.mode (dry_run | auto | semi_auto) and backfill
+        # from the legacy dry_run boolean.
+        try:
+            await db.execute(
+                "ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'auto'"
+            )
+            await db.execute(
+                "UPDATE jobs SET mode = 'dry_run' WHERE dry_run = 1"
+            )
+        except aiosqlite.OperationalError:
+            pass
         await db.commit()
 
 

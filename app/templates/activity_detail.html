@@ -93,13 +93,21 @@
 
     <div class="flex flex-wrap gap-2 mt-2">
       <form hx-post="/activity/{{ strava_id }}/merge" hx-target="#last-job" hx-swap="innerHTML">
-        <input type="hidden" name="dry_run" value="true">
+        <input type="hidden" name="mode" value="dry_run">
         <button class="btn btn-outline btn-warning btn-sm" type="submit">Auto-match + DRY RUN</button>
       </form>
 
+      <form hx-post="/activity/{{ strava_id }}/merge" hx-target="#last-job" hx-swap="innerHTML">
+        <input type="hidden" name="mode" value="semi_auto">
+        <button class="btn btn-primary btn-sm" type="submit">
+          Auto-match + SEMI-AUTO (you delete on Strava, then click upload)
+        </button>
+      </form>
+
       <form hx-post="/activity/{{ strava_id }}/merge" hx-target="#last-job" hx-swap="innerHTML"
-            hx-confirm="Delete the original Strava activity and replace it with the merged version?">
-        <button class="btn btn-error btn-sm" type="submit">Auto-match + REPLACE</button>
+            hx-confirm="Delete the original Strava activity via API and replace it with the merged version? Strava's DELETE may fail.">
+        <input type="hidden" name="mode" value="auto">
+        <button class="btn btn-error btn-sm" type="submit">Auto-match + AUTO replace</button>
       </form>
     </div>
 

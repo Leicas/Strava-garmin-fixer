@@ -71,10 +71,11 @@ def _badge_for(result: str | None) -> dict[str, str]:
 
 def _job_status_badge(status: str | None) -> dict[str, str]:
     return {
-        "queued":  {"label": "queued",  "css": "badge-ghost"},
-        "running": {"label": "running", "css": "badge-info"},
-        "success": {"label": "success", "css": "badge-success"},
-        "error":   {"label": "error",   "css": "badge-error"},
+        "queued":          {"label": "queued",          "css": "badge-ghost"},
+        "running":         {"label": "running",         "css": "badge-info"},
+        "awaiting_delete": {"label": "awaiting delete", "css": "badge-warning"},
+        "success":         {"label": "success",         "css": "badge-success"},
+        "error":           {"label": "error",           "css": "badge-error"},
     }.get(status or "", {"label": status or "?", "css": "badge-ghost"})
 
 
@@ -166,6 +167,66 @@ def _tcx_path(tcx_bytes: bytes) -> list[list[float]]:
 def _strava_latlng_path(streams: dict[str, Any]) -> list[list[float]]:
     raw = (streams.get("latlng") or {}).get("data") or []
     return [pt for pt in raw if pt and len(pt) == 2 and pt[0] is not None]
+
+
+def _tcx_chart_series(tcx_bytes: bytes) -> dict[str, Any]:
+    """Pull ([epoch_offsets_s], [hr], [lat], [lon], [alt]) arrays out of a
+    TCX. ``epoch_offsets_s`` is seconds since the first trackpoint."""
+    out: dict[str, Any] = {"t": [], "hr": [], "lat": [], "lon": [], "alt": []}
+    try:
+        root = etree.fromstring(tcx_bytes)
+    except etree.XMLSyntaxError:
+        return out
+    base: datetime | None = None
+    for tp in root.iterfind(".//tcd:Trackpoint", TCX_NS):
+        time_el = tp.find("tcd:Time", TCX_NS)
+        if time_el is None or not time_el.text:
+            continue
+        try:
+            ts = datetime.fromisoformat(time_el.text.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if base is None:
+            base = ts
+        offset = (ts - base).total_seconds()
+
+        hr_el = tp.find("tcd:HeartRateBpm/tcd:Value", TCX_NS)
+        hr = int(hr_el.text) if (hr_el is not None and hr_el.text) else None
+
+        pos = tp.find("tcd:Position", TCX_NS)
+        lat = lon = None
+        if pos is not None:
+            lat_el = pos.find("tcd:LatitudeDegrees", TCX_NS)
+            lon_el = pos.find("tcd:LongitudeDegrees", TCX_NS)
+            if lat_el is not None and lon_el is not None:
+                try:
+                    lat = float(lat_el.text)
+                    lon = float(lon_el.text)
+                except (TypeError, ValueError):
+                    lat = lon = None
+
+        alt_el = tp.find("tcd:AltitudeMeters", TCX_NS)
+        alt = float(alt_el.text) if (alt_el is not None and alt_el.text) else None
+
+        out["t"].append(offset)
+        out["hr"].append(hr)
+        out["lat"].append(lat)
+        out["lon"].append(lon)
+        out["alt"].append(alt)
+    return out
+
+
+def _strava_chart_series(streams: dict[str, Any]) -> dict[str, Any]:
+    """Trim Strava streams to the keys we plot, with a shared time axis."""
+    times = (streams.get("time") or {}).get("data") or []
+    return {
+        "t":          times,
+        "heartrate":  (streams.get("heartrate") or {}).get("data") or [],
+        "cadence":    (streams.get("cadence") or {}).get("data") or [],
+        "speed":      (streams.get("velocity_smooth") or {}).get("data") or [],
+        "temp":       (streams.get("temp") or {}).get("data") or [],
+        "altitude":   (streams.get("altitude") or {}).get("data") or [],
+    }
 
 
 # ---------- index -----------------------------------------------------------
@@ -292,22 +353,27 @@ async def activity_merge(
     strava_id: int,
     bg: BackgroundTasks,
     external_id: str | None = Form(None),
-    dry_run: bool = Form(False),
+    mode: str = Form(jobs_mod.MODE_AUTO),
 ) -> HTMLResponse:
     from app.worker import run_merge_job
+
+    if mode not in (jobs_mod.MODE_DRY_RUN, jobs_mod.MODE_AUTO, jobs_mod.MODE_SEMI_AUTO):
+        raise HTTPException(400, f"invalid mode {mode!r}")
 
     job_id = await jobs_mod.enqueue(
         strava_id,
         external_id=external_id,
         trigger="manual",
-        dry_run=dry_run,
+        mode=mode,
     )
     bg.add_task(run_merge_job, job_id)
-    job = await jobs_mod.get(job_id) or {"id": job_id, "status": "queued",
-                                         "strava_id": strava_id, "started_at": None,
-                                         "finished_at": None, "trigger": "manual",
-                                         "dry_run": int(dry_run), "error": None,
-                                         "external_id": external_id, "log": ""}
+    job = await jobs_mod.get(job_id) or {
+        "id": job_id, "status": "queued", "strava_id": strava_id,
+        "started_at": None, "finished_at": None, "trigger": "manual",
+        "dry_run": 1 if mode == jobs_mod.MODE_DRY_RUN else 0,
+        "mode": mode, "error": None,
+        "external_id": external_id, "log": "", "recovery_path": None,
+    }
     return templates.TemplateResponse(
         request, "partials/job_row.html",
         {"job": _shape_job(job)},
@@ -366,6 +432,8 @@ async def preview(request: Request, strava_id: int, external_id: str) -> HTMLRes
         ctx["source_point_count"] = len(source_path)
         ctx["stats"] = result_summary
         ctx["merge_error"] = merge_error
+        ctx["strava_series_json"] = json.dumps(_strava_chart_series(streams))
+        ctx["source_series_json"] = json.dumps(_tcx_chart_series(tcx))
 
     except StravaNotConfigured:
         ctx["error"] = "Strava not connected."
@@ -454,6 +522,52 @@ async def google_recent(request: Request, days: int = 30) -> HTMLResponse:
     return templates.TemplateResponse(request, "google_recent.html", ctx)
 
 
+@router.get("/google/exercise/{external_id}", response_class=HTMLResponse)
+async def google_exercise_detail(request: Request, external_id: str) -> HTMLResponse:
+    """Map + HR chart for a single Google Health exercise, parsed from its TCX."""
+    ctx: dict[str, Any] = {
+        "external_id": external_id,
+        "error": None,
+        "path_json": "[]",
+        "series_json": json.dumps({"t": [], "hr": [], "alt": []}),
+        "point_count": 0,
+        "started_iso": None,
+        "duration_s": None,
+    }
+    try:
+        async with GoogleHealthClient.open() as gc:
+            tcx = await gc.get_exercise_tcx(external_id)
+        series = _tcx_chart_series(tcx)
+        path = [[lat, lon] for lat, lon in zip(series["lat"], series["lon"])
+                if lat is not None and lon is not None]
+
+        # Read first <Time> for display.
+        try:
+            root = etree.fromstring(tcx)
+            first = root.find(".//tcd:Trackpoint/tcd:Time", TCX_NS)
+            ctx["started_iso"] = first.text if first is not None else None
+        except etree.XMLSyntaxError:
+            pass
+
+        ctx["path_json"] = json.dumps(path)
+        # uPlot can't plot null y-values; replace with NaN-equivalent for JSON.
+        ctx["series_json"] = json.dumps({
+            "t": series["t"],
+            "hr": [v for v in series["hr"]],
+            "alt": [v for v in series["alt"]],
+        })
+        ctx["point_count"] = len(path)
+        if series["t"]:
+            ctx["duration_s"] = int(series["t"][-1])
+
+    except GoogleNotConfigured:
+        ctx["error"] = "Google Health not connected. Connect from Settings."
+    except Exception as e:  # noqa: BLE001 - surface in UI
+        ctx["error"] = f"{type(e).__name__}: {e}"
+
+    return templates.TemplateResponse(request, "google_exercise.html", ctx)
+
+
 @router.get("/google/{external_id}/_strava_matches", response_class=HTMLResponse)
 async def google_strava_matches(
     request: Request, external_id: str
@@ -508,12 +622,14 @@ def _shape_job(j: dict[str, Any]) -> dict[str, Any]:
         "trigger": j["trigger"],
         "status": j["status"],
         "status_badge": _job_status_badge(j["status"]),
+        "mode": j.get("mode") or ("dry_run" if j.get("dry_run") else "auto"),
         "dry_run": bool(j.get("dry_run")),
         "started": _format_unix(j.get("started_at")),
         "finished": _format_unix(j.get("finished_at")),
         "error": j.get("error"),
         "log": (j.get("log") or "").strip(),
         "has_recovery": has_recovery,
+        "awaiting_delete": (j.get("status") == "awaiting_delete"),
     }
 
 
@@ -532,6 +648,34 @@ async def job_row(request: Request, job_id: int) -> HTMLResponse:
     j = await jobs_mod.get(job_id)
     if j is None:
         raise HTTPException(404, "job not found")
+    return templates.TemplateResponse(
+        request, "partials/job_row.html",
+        {"job": _shape_job(j)},
+    )
+
+
+@router.post("/jobs/{job_id}/finish-upload", response_class=HTMLResponse,
+             dependencies=[Depends(require_htmx)])
+async def job_finish_upload(
+    request: Request,
+    job_id: int,
+    bg: BackgroundTasks,
+) -> HTMLResponse:
+    """User has (presumably) deleted the original on Strava UI; now upload
+    the merged FIT from disk. Triggers worker.resume_upload as a background
+    task and returns the updated job row so HTMX can poll it to completion."""
+    from app.worker import resume_upload
+
+    j = await jobs_mod.get(job_id)
+    if j is None:
+        raise HTTPException(404, "job not found")
+    if j["status"] != "awaiting_delete":
+        raise HTTPException(409, f"job is in status {j['status']!r}, not awaiting_delete")
+
+    bg.add_task(resume_upload, job_id)
+    # Optimistically render the row in 'running' state — the polling will
+    # converge to the real state.
+    j["status"] = "running"
     return templates.TemplateResponse(
         request, "partials/job_row.html",
         {"job": _shape_job(j)},
