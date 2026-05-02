@@ -71,6 +71,23 @@
 
 <div class="card bg-base-100 shadow mt-4">
   <div class="card-body">
+    <h2 class="card-title">Mark as merged (manual workflow)</h2>
+    <p class="text-sm opacity-70">
+      If you downloaded the merged FIT and uploaded it to Strava yourself
+      (recommended workflow — Strava's API delete is unreliable, so the
+      auto path can hit dedup), click here so the webhook stops trying to
+      re-merge this activity.
+    </p>
+    <form hx-post="/activity/{{ strava_id }}/mark-merged"
+          hx-target="#mark-merged-result" hx-swap="innerHTML">
+      <button class="btn btn-success btn-sm w-fit" type="submit">Mark as merged</button>
+    </form>
+    <div id="mark-merged-result" class="mt-2"></div>
+  </div>
+</div>
+
+<div class="card bg-base-100 shadow mt-4">
+  <div class="card-body">
     <h2 class="card-title">Run merge</h2>
     <p class="text-sm opacity-70">Always preview first if you can. The merge is deterministic — same inputs → same FIT.</p>
 

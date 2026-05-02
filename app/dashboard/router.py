@@ -58,6 +58,8 @@ def _badge_for(result: str | None) -> dict[str, str]:
         return {"label": "Untouched", "css": "badge-ghost"}
     if result.startswith("success"):
         return {"label": "Merged", "css": "badge-success"}
+    if result == "merged_manually":
+        return {"label": "Merged (manual)", "css": "badge-success badge-outline"}
     if result == "pending_manual_review":
         return {"label": "Review", "css": "badge-warning"}
     if result.startswith("skipped"):
@@ -255,6 +257,31 @@ async def activity_google_matches(request: Request, strava_id: int) -> HTMLRespo
         request,
         "partials/google_matches.html",
         {"strava_id": strava_id, "matches": matches, "error": error},
+    )
+
+
+@router.post("/activity/{strava_id}/mark-merged", response_class=HTMLResponse,
+             dependencies=[Depends(require_htmx)])
+async def activity_mark_merged(
+    request: Request,
+    strava_id: int,
+    external_id: str | None = Form(None),
+    note: str | None = Form(None),
+) -> HTMLResponse:
+    """Record that the user manually completed a merge for this activity (e.g.
+    they downloaded the merged FIT and uploaded it via Strava UI). Future
+    webhook events for this strava_id will be skipped by is_already_processed."""
+    await jobs_mod.record_processed(
+        strava_id,
+        external_id=external_id,
+        result="merged_manually",
+        notes=(note or "marked merged via dashboard"),
+    )
+    log.info("dashboard.mark_merged", strava_id=strava_id, external_id=external_id)
+    return HTMLResponse(
+        '<div class="alert alert-success text-sm">'
+        '<span>Marked as merged. Future webhook events for this activity will skip auto-merge.</span>'
+        '</div>'
     )
 
 

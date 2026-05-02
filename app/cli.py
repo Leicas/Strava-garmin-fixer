@@ -72,6 +72,36 @@ async def _strava_fetch_activity(activity_id: int) -> int:
     return 0
 
 
+async def _strava_delete(activity_id: int) -> int:
+    """One-shot probe: try deleting an activity and report the exact result.
+    Use a throwaway test activity. Strava's DELETE endpoint behavior has been
+    inconsistent over the years; this confirms whether the token can delete."""
+    import httpx
+    try:
+        async with StravaClient.open() as client:
+            try:
+                await client.delete_activity(activity_id)
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                body = e.response.text[:200]
+                if code in (401, 403):
+                    print(f"DELETE returned {code} → token lacks delete permission")
+                    print(f"   (re-authorize and check ALL scope boxes, especially activity:write)")
+                elif code == 404:
+                    print(f"DELETE returned 404 → token CAN delete; activity {activity_id} doesn't exist")
+                    print(f"   This is a successful permission test — try with a real activity id.")
+                else:
+                    print(f"DELETE returned {code}: {body}")
+                return 0
+    except StravaNotConfigured as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    print(f"DELETE returned 204 — activity {activity_id} was actually deleted.")
+    print(f"  ⚠ It's gone for good. Hope that was a test ride.")
+    return 0
+
+
 async def _strava_streams(activity_id: int, out: str | None) -> int:
     try:
         async with StravaClient.open() as client:
@@ -243,6 +273,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_streams.add_argument("activity_id", type=int)
     p_streams.add_argument("--out", help="Write to file instead of stdout")
 
+    p_del = strava_sub.add_parser("delete-activity",
+        help="Probe: try deleting an activity to confirm token write permission. "
+             "Use a throwaway test activity id — if it works, the activity is gone.")
+    p_del.add_argument("activity_id", type=int)
+
     # google ---------------------------------------------------------------
     google = sub.add_parser("google", help="Google Health CLI")
     google_sub = google.add_subparsers(dest="google_cmd", required=True)
@@ -299,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_strava_fetch_activity(args.activity_id))
         if args.strava_cmd == "streams":
             return asyncio.run(_strava_streams(args.activity_id, args.out))
+        if args.strava_cmd == "delete-activity":
+            return asyncio.run(_strava_delete(args.activity_id))
 
     if args.cmd == "google":
         if args.google_cmd == "list":

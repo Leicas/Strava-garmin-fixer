@@ -128,10 +128,15 @@ async def set_recovery_path(job_id: int, path: str | None) -> None:
 
 
 async def is_already_processed(strava_id: int) -> bool:
+    """True if the activity has been merged (auto or manual) and the webhook
+    should skip it. Both ``success`` (full auto-replace) and
+    ``merged_manually`` (user uploaded the merged FIT themselves and clicked
+    Mark as Merged) count."""
     async with connect() as db:
         row = await (
             await db.execute(
-                "SELECT 1 FROM processed_activities WHERE strava_id = ? AND result = 'success'",
+                "SELECT 1 FROM processed_activities WHERE strava_id = ? "
+                "AND result IN ('success', 'merged_manually')",
                 (strava_id,),
             )
         ).fetchone()

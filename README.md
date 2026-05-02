@@ -49,6 +49,32 @@ What this does NOT cover:
 - Compromised browser session. Out of scope.
 - DoS / rate limiting. Use the tunnel layer.
 
+## Workflow note: Strava's API delete is unreliable
+
+Strava documents `DELETE /activities/{id}` as a supported endpoint with
+`activity:write` scope, but it has been inconsistent in practice. Combined
+with Strava's content-based duplicate detection (which rejects uploads whose
+start time matches an existing activity), this means the fully-automatic
+"delete original → upload merged" path can fail.
+
+**Recommended workflow:** manual upload via the dashboard.
+
+1. From the activity detail page → click **Find Google Health match** → pick the right one → **Download merged FIT**.
+2. Upload the FIT to Strava via the web UI.
+3. Delete the original on Strava via the web UI.
+4. Back on the original activity's detail page in StravaFit, click **Mark as merged** so the webhook handler skips it next time.
+
+**Probe whether DELETE works for your token:** before you trust auto-replace,
+try `stravafit strava delete-activity <test_id>` on a throwaway test ride.
+If it returns 204 (or 404 for a nonexistent id, meaning permission was OK),
+the auto path is safe. If 401/403, stick to manual.
+
+**Safety net for auto-replace:** when you do click "Replace on Strava (auto)",
+the worker writes the merged FIT to `data/recovery/strava-{id}-{ts}.fit`
+*before* deleting the original. If anything fails between delete and upload,
+the recovery file is downloadable from `/jobs/{id}/recovery.fit` so you can
+finish the upload by hand.
+
 ## Run in Docker (recommended for server deployment)
 
 ```sh
