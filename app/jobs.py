@@ -117,6 +117,16 @@ async def record_processed(
         await db.commit()
 
 
+async def set_recovery_path(job_id: int, path: str | None) -> None:
+    """Record (or clear) the on-disk merged-FIT recovery file for a job."""
+    async with connect() as db:
+        await db.execute(
+            "UPDATE jobs SET recovery_path = ? WHERE id = ?",
+            (path, job_id),
+        )
+        await db.commit()
+
+
 async def is_already_processed(strava_id: int) -> bool:
     async with connect() as db:
         row = await (

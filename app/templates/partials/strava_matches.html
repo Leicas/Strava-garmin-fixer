@@ -1,0 +1,24 @@
+{% if error %}
+  <div class="alert alert-error text-sm"><span>{{ error }}</span></div>
+{% elif not matches %}
+  <div class="alert alert-warning text-sm"><span>No Strava activities within ±2h of this exercise's start time.</span></div>
+{% else %}
+  <table class="table table-zebra table-sm">
+    <thead>
+      <tr><th>Started</th><th>Name</th><th>Strava id</th><th>Type</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for m in matches %}
+      <tr>
+        <td class="whitespace-nowrap">{{ (m.start_date_local or '')[:19] }}</td>
+        <td>{{ m.name or '' }}</td>
+        <td class="font-mono">{{ m.id }}</td>
+        <td class="text-xs opacity-70">{{ m.type or '' }}</td>
+        <td>
+          <a class="btn btn-primary btn-xs" href="/preview/{{ m.id }}/{{ external_id }}">Preview</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}

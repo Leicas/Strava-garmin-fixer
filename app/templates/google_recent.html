@@ -4,11 +4,20 @@
 {% block content %}
 <div class="flex items-center justify-between mb-4">
   <h1 class="text-2xl font-semibold">Recent Google Health exercises</h1>
-  {% if connected %}
-    <span class="badge badge-success badge-outline">Google Health connected</span>
-  {% else %}
-    <span class="badge badge-warning badge-outline">Not connected</span>
-  {% endif %}
+  <div class="flex items-center gap-3">
+    <span class="text-xs opacity-70">last <strong>{{ days }}</strong> days</span>
+    <div class="join">
+      <a href="?days=7"   class="btn btn-xs join-item {% if days == 7 %}btn-primary{% endif %}">7d</a>
+      <a href="?days=30"  class="btn btn-xs join-item {% if days == 30 %}btn-primary{% endif %}">30d</a>
+      <a href="?days=90"  class="btn btn-xs join-item {% if days == 90 %}btn-primary{% endif %}">90d</a>
+      <a href="?days=365" class="btn btn-xs join-item {% if days == 365 %}btn-primary{% endif %}">365d</a>
+    </div>
+    {% if connected %}
+      <span class="badge badge-success badge-outline">connected</span>
+    {% else %}
+      <span class="badge badge-warning badge-outline">not connected</span>
+    {% endif %}
+  </div>
 </div>
 
 {% if not connected %}
@@ -26,7 +35,7 @@
 {% elif error %}
   <div class="alert alert-error"><span>{{ error }}</span></div>
 {% elif not activities %}
-  <div class="alert"><span>No Google Health exercises this month.</span></div>
+  <div class="alert"><span>No Google Health exercises in the last {{ days }} days.</span></div>
 {% else %}
   <div class="overflow-x-auto bg-base-100 rounded-lg shadow">
     <table class="table table-zebra">
@@ -36,6 +45,7 @@
           <th>Activity type</th>
           <th>Data point id</th>
           <th>Duration</th>
+          <th>Find Strava match</th>
         </tr>
       </thead>
       <tbody>
@@ -51,6 +61,20 @@
             {% if interval.startTime and interval.endTime %}
               {{ interval.startTime[:19] }} → {{ interval.endTime[:19] }}
             {% endif %}
+          </td>
+          <td>
+            <button class="btn btn-primary btn-xs"
+                    hx-get="/google/{{ dpid }}/_strava_matches"
+                    hx-target="#strava-matches-{{ dpid }}"
+                    hx-swap="innerHTML">
+              Search
+            </button>
+          </td>
+        </tr>
+        <tr id="strava-matches-row-{{ dpid }}">
+          <td></td>
+          <td colspan="4">
+            <div id="strava-matches-{{ dpid }}"></div>
           </td>
         </tr>
         {% endfor %}

@@ -93,6 +93,43 @@ class StravaClient:
         )
         return r.json()
 
+    async def find_near(
+        self,
+        when: "datetime",
+        *,
+        window_minutes: int = 120,
+    ) -> list[dict[str, Any]]:
+        """Return Strava activities whose start_date is within +/- window_minutes
+        of ``when``, sorted by absolute time delta. Uses the before/after
+        unix-timestamp filter on /athlete/activities."""
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+        if when.tzinfo is None:
+            when_aware = when.replace(tzinfo=_tz.utc)
+        else:
+            when_aware = when
+        window = _td(minutes=window_minutes)
+        before = int((when_aware + window).timestamp())
+        after = int((when_aware - window).timestamp())
+        r = await self._request(
+            "GET",
+            "/athlete/activities",
+            params={"before": before, "after": after, "per_page": 30},
+        )
+        candidates = r.json()
+        scored: list[tuple[_td, dict[str, Any]]] = []
+        for a in candidates:
+            raw = a.get("start_date") or a.get("start_date_local")
+            if not raw:
+                continue
+            try:
+                started = _dt.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            scored.append((abs(started - when_aware), a))
+        scored.sort(key=lambda p: p[0])
+        return [a for _, a in scored]
+
     async def get_activity(self, activity_id: int) -> dict[str, Any]:
         r = await self._request("GET", f"/activities/{activity_id}")
         return r.json()

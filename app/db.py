@@ -25,6 +25,11 @@ async def init_db() -> None:
                 )
             except aiosqlite.OperationalError:
                 pass
+        # Migration: add jobs.recovery_path for the on-disk safety net.
+        try:
+            await db.execute("ALTER TABLE jobs ADD COLUMN recovery_path TEXT")
+        except aiosqlite.OperationalError:
+            pass
         await db.commit()
 
 

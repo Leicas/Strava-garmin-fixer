@@ -18,16 +18,17 @@ CREATE TABLE IF NOT EXISTS processed_activities (
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    strava_id   INTEGER NOT NULL,
-    external_id TEXT,                          -- source data point id
-    trigger     TEXT NOT NULL,                -- 'webhook' | 'manual' | 'preview'
-    status      TEXT NOT NULL,                -- 'queued' | 'running' | 'success' | 'error'
-    dry_run     INTEGER NOT NULL DEFAULT 0,
-    started_at  INTEGER,
-    finished_at INTEGER,
-    error       TEXT,
-    log         TEXT
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    strava_id     INTEGER NOT NULL,
+    external_id   TEXT,                        -- source data point id
+    trigger       TEXT NOT NULL,               -- 'webhook' | 'manual' | 'preview'
+    status        TEXT NOT NULL,               -- 'queued' | 'running' | 'success' | 'error'
+    dry_run       INTEGER NOT NULL DEFAULT 0,
+    started_at    INTEGER,
+    finished_at   INTEGER,
+    error         TEXT,
+    log           TEXT,
+    recovery_path TEXT                         -- on-disk merged FIT for failed replace ops
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_strava_id ON jobs(strava_id);

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from lxml import etree
 
@@ -350,6 +350,38 @@ async def preview(request: Request, strava_id: int, external_id: str) -> HTMLRes
     return templates.TemplateResponse(request, "preview.html", ctx)
 
 
+@router.get("/preview/{strava_id}/{external_id}/download.fit")
+async def preview_download(strava_id: int, external_id: str) -> Response:
+    """Run the merge inline and return the FIT bytes as a download. The
+    safest workflow — no Strava write, user uploads manually."""
+    try:
+        async with StravaClient.open() as sc:
+            activity = await sc.get_activity(strava_id)
+            streams = await sc.get_streams(strava_id)
+        start_dt = _parse_strava_start(activity.get("start_date"))
+        async with GoogleHealthClient.open() as gc:
+            tcx = await gc.get_exercise_tcx(external_id)
+        result = merge_streams_to_fit(
+            strava_streams=streams,
+            strava_start_time=start_dt,
+            fitbit_tcx=tcx,
+            activity_name=activity.get("name") or "Merged ride",
+        )
+    except StravaNotConfigured:
+        raise HTTPException(412, "Strava not connected")
+    except GoogleNotConfigured:
+        raise HTTPException(412, "Google Health not connected")
+    except MergeError as e:
+        raise HTTPException(422, f"merge failed: {e}")
+
+    filename = f"strava-{strava_id}-merged.fit"
+    return Response(
+        content=result.fit_bytes,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ---------- manual ----------------------------------------------------------
 
 @router.get("/manual", response_class=HTMLResponse)
@@ -369,14 +401,17 @@ async def manual_submit(
 # ---------- google health recent --------------------------------------------
 
 @router.get("/google/recent", response_class=HTMLResponse)
-async def google_recent(request: Request) -> HTMLResponse:
-    ctx: dict[str, Any] = {"connected": False, "activities": [], "error": None}
+async def google_recent(request: Request, days: int = 30) -> HTMLResponse:
+    """List recent Google Health exercises. ``days`` query param controls the
+    look-back window (default 30, sane bounds 1..365)."""
+    days = max(1, min(int(days), 365))
+    ctx: dict[str, Any] = {"connected": False, "activities": [], "error": None,
+                           "days": days}
     try:
         async with GoogleHealthClient.open() as client:
-            after = (datetime.now(timezone.utc).date().replace(day=1)).isoformat()
+            after = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
             activities = await client.list_exercises(after_date=after, page_size=25)
         ctx["connected"] = True
-        # newest first — sort on whatever start time the activity has
         activities.sort(
             key=lambda a: (
                 ((a.get("exercise") or {}).get("interval") or {}).get("startTime") or ""
@@ -392,9 +427,53 @@ async def google_recent(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "google_recent.html", ctx)
 
 
+@router.get("/google/{external_id}/_strava_matches", response_class=HTMLResponse)
+async def google_strava_matches(
+    request: Request, external_id: str
+) -> HTMLResponse:
+    """HTMX fragment: list Strava activities near a Google Health exercise's start time."""
+    matches: list[dict[str, Any]] = []
+    error: str | None = None
+    try:
+        async with GoogleHealthClient.open() as gc:
+            # Fetch the exercise to read its start time.
+            tcx = None  # not actually needed
+            # Cheaper: list_exercises filters by civil date, so fall back to
+            # a direct GET of the data point would be ideal but we don't have
+            # that endpoint. Use the start time from the TCX.
+            tcx_bytes = await gc.get_exercise_tcx(external_id)
+        # Parse first <Time> from the TCX as the exercise start.
+        from lxml import etree
+        try:
+            root = etree.fromstring(tcx_bytes)
+        except etree.XMLSyntaxError:
+            raise RuntimeError("could not parse TCX")
+        first = root.find(".//tcd:Trackpoint/tcd:Time", TCX_NS)
+        if first is None or not first.text:
+            raise RuntimeError("TCX has no trackpoints with a Time element")
+        when = datetime.fromisoformat(first.text.replace("Z", "+00:00"))
+
+        async with StravaClient.open() as sc:
+            matches = await sc.find_near(when, window_minutes=120)
+    except StravaNotConfigured:
+        error = "Strava not connected."
+    except GoogleNotConfigured:
+        error = "Google Health not connected."
+    except Exception as e:  # noqa: BLE001 - surface in UI
+        error = f"{type(e).__name__}: {e}"
+
+    return templates.TemplateResponse(
+        request,
+        "partials/strava_matches.html",
+        {"external_id": external_id, "matches": matches, "error": error},
+    )
+
+
 # ---------- jobs -------------------------------------------------------------
 
 def _shape_job(j: dict[str, Any]) -> dict[str, Any]:
+    rp = j.get("recovery_path")
+    has_recovery = bool(rp) and Path(rp).is_file() if rp else False
     return {
         "id": j["id"],
         "strava_id": j["strava_id"],
@@ -407,6 +486,7 @@ def _shape_job(j: dict[str, Any]) -> dict[str, Any]:
         "finished": _format_unix(j.get("finished_at")),
         "error": j.get("error"),
         "log": (j.get("log") or "").strip(),
+        "has_recovery": has_recovery,
     }
 
 
@@ -428,6 +508,25 @@ async def job_row(request: Request, job_id: int) -> HTMLResponse:
     return templates.TemplateResponse(
         request, "partials/job_row.html",
         {"job": _shape_job(j)},
+    )
+
+
+@router.get("/jobs/{job_id}/recovery.fit")
+async def job_recovery_download(job_id: int) -> FileResponse:
+    """Serve the on-disk recovery FIT for a job whose Strava replace failed."""
+    j = await jobs_mod.get(job_id)
+    if j is None:
+        raise HTTPException(404, "job not found")
+    rp = j.get("recovery_path")
+    if not rp:
+        raise HTTPException(404, "no recovery file for this job")
+    p = Path(rp)
+    if not p.is_file():
+        raise HTTPException(410, "recovery file is no longer on disk")
+    return FileResponse(
+        path=str(p),
+        media_type="application/octet-stream",
+        filename=f"strava-{j['strava_id']}-merged.fit",
     )
 
 

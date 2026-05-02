@@ -13,7 +13,14 @@
   <td><span class="badge {{ job.status_badge.css }}">{{ job.status_badge.label }}</span></td>
   <td class="text-xs">{{ job.started }}</td>
   <td class="text-xs">{{ job.finished }}</td>
-  {% if job.error %}<td class="text-xs text-error">{{ job.error[:80] }}</td>{% else %}<td></td>{% endif %}
+  <td class="text-xs">
+    {% if job.error %}<span class="text-error">{{ job.error[:80] }}</span>{% endif %}
+    {% if job.has_recovery %}
+      <a class="btn btn-warning btn-xs ml-1" href="/jobs/{{ job.id }}/recovery.fit" download>
+        Download recovery FIT
+      </a>
+    {% endif %}
+  </td>
 </tr>
 {% if job.log %}
 <tr id="job-{{ job.id }}-log">

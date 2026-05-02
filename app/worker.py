@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import structlog
 
 from app import jobs
+from app.config import settings
 from app.google_health.client import GoogleHealthClient, GoogleNotConfigured
 from app.merge import MergeError, merge_streams_to_fit
 from app.strava.client import StravaClient, StravaNotConfigured, StravaUploadError
@@ -158,16 +161,27 @@ async def run_merge_job(job_id: int) -> None:
             await jobs.mark_success(job_id)
             return
 
-        # Upload-first / delete-second. Worst case is "duplicate activities"
-        # (merged + original both present), not "original gone and merge failed".
+        # Strava's content-duplicate detection rejects an upload whose start
+        # time matches an existing activity, so we MUST delete the original
+        # before uploading the merged file. To make that safe, we save the
+        # merged bytes to disk first; if any step in the replace fails, the
+        # user can recover via /jobs/{id}/recovery.fit and upload manually.
         base_desc = activity.get("description") or ""
         new_desc = f"{base_desc} {jobs.LOOP_MARKER}".strip()
         original_name = activity.get("name")
 
-        async with StravaClient.open() as sc:
-            # Step 1: upload merged FIT. If this fails for any reason, the
-            # original is still on Strava — we just mark the job an error.
-            try:
+        recovery_dir = Path(settings.database_path).parent / "recovery"
+        recovery_dir.mkdir(parents=True, exist_ok=True)
+        recovery_path = recovery_dir / f"strava-{strava_id}-{int(time.time())}.fit"
+        recovery_path.write_bytes(result.fit_bytes)
+        await jobs.set_recovery_path(job_id, str(recovery_path))
+        await _say(job_id, "recovery.saved", path=str(recovery_path))
+
+        try:
+            async with StravaClient.open() as sc:
+                await _say(job_id, "strava.delete_original")
+                await sc.delete_activity(strava_id)
+
                 await _say(job_id, "strava.upload", bytes=n_bytes)
                 resp = await sc.upload(
                     result.fit_bytes,
@@ -181,51 +195,42 @@ async def run_merge_job(job_id: int) -> None:
                 final = await sc.wait_for_upload(upload_id, timeout_s=120, poll_s=3)
                 new_id = int(final["activity_id"])
                 await _say(job_id, "strava.upload_finished", new_activity_id=new_id)
-            except Exception as exc:
-                await _say(job_id, "strava.upload_failed", err=str(exc))
-                bound.error("worker.upload_failed", err=str(exc))
-                await jobs.mark_error(job_id, f"upload_failed: {exc}")
-                await jobs.record_processed(
-                    strava_id,
-                    external_id=chosen_external_id,
-                    result=f"error:upload:{exc}",
-                    notes="original is intact",
-                )
-                return
 
-            # Step 2: restore the original name (Strava sometimes overwrites
-            # from FIT metadata). Best-effort.
-            if original_name:
-                try:
-                    await sc.update_activity(new_id, name=original_name)
-                    await _say(job_id, "strava.name_restored", name=original_name)
-                except Exception as ne:  # noqa: BLE001 - non-fatal touch-up
-                    await _say(job_id, "strava.name_restore_failed", err=str(ne))
+                if original_name:
+                    try:
+                        await sc.update_activity(new_id, name=original_name)
+                        await _say(job_id, "strava.name_restored", name=original_name)
+                    except Exception as ne:  # noqa: BLE001 - non-fatal touch-up
+                        await _say(job_id, "strava.name_restore_failed", err=str(ne))
+        except Exception as exc:
+            # Replace failed somewhere between delete and upload+wait. The
+            # recovery file on disk is the safety net.
+            await _say(job_id, "strava.replace_failed", err=str(exc),
+                       recovery=str(recovery_path))
+            bound.error("worker.replace_failed", err=str(exc),
+                        recovery=str(recovery_path))
+            await jobs.append_log(
+                job_id,
+                f"RECOVERY: merged FIT is on disk at {recovery_path.name}. "
+                f"Download it from /jobs/{job_id}/recovery.fit and upload to "
+                f"Strava manually to recover.",
+            )
+            await jobs.mark_error(job_id, f"replace_failed: {exc}")
+            await jobs.record_processed(
+                strava_id,
+                external_id=chosen_external_id,
+                result=f"error:replace:{exc}",
+                notes=f"recovery_file={recovery_path.name}",
+            )
+            return
 
-            # Step 3: delete the original. If this fails, the merged copy is
-            # already up and good — we just have a duplicate to clean up
-            # manually. Mark success but flag the duplicate.
-            try:
-                await _say(job_id, "strava.delete_original")
-                await sc.delete_activity(strava_id)
-            except Exception as exc:
-                await _say(job_id, "strava.delete_failed", err=str(exc))
-                bound.warning("worker.delete_failed_duplicate", err=str(exc),
-                              new_id=new_id, original_id=strava_id)
-                await jobs.append_log(
-                    job_id,
-                    f"WARNING: merged upload succeeded (new strava_id={new_id}) but the "
-                    f"original (strava_id={strava_id}) could not be deleted: {exc}. "
-                    f"You have a duplicate — delete one manually on Strava.",
-                )
-                await jobs.record_processed(
-                    strava_id,
-                    external_id=chosen_external_id,
-                    result="success",
-                    notes=f"new_id={new_id}; original NOT deleted (duplicate)",
-                )
-                await jobs.mark_success(job_id)
-                return
+        # Replace succeeded: clean up the recovery file. Best-effort — if
+        # cleanup fails the file just sticks around in data/recovery/.
+        try:
+            recovery_path.unlink(missing_ok=True)
+            await jobs.set_recovery_path(job_id, None)
+        except OSError as ce:
+            await _say(job_id, "recovery.cleanup_failed", err=str(ce))
 
         await jobs.record_processed(
             strava_id,
