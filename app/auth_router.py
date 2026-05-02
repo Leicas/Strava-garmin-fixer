@@ -72,6 +72,9 @@ async def strava_start() -> RedirectResponse:
     return RedirectResponse(url, status_code=302)
 
 
+_REQUIRED_STRAVA_SCOPES = ("activity:read_all", "activity:write")
+
+
 @router.get("/auth/strava/callback")
 async def strava_callback(
     code: str | None = Query(None),
@@ -84,6 +87,21 @@ async def strava_callback(
         return RedirectResponse(f"/settings?auth_error=strava:{error}", status_code=303)
     if not code:
         return RedirectResponse("/settings?auth_error=strava:no_code", status_code=303)
+
+    # Strava lets users uncheck individual scopes on the consent screen, so
+    # `scope` may be a subset of what we asked for. Reject if a required scope
+    # is missing — silently saving a read-only token and failing on the next
+    # delete/upload is much more confusing. (Side-effect-free, so it runs
+    # before the state check.)
+    granted = set((scope or "").split(","))
+    missing = [s for s in _REQUIRED_STRAVA_SCOPES if s not in granted]
+    if missing:
+        log.warning("auth.strava.missing_scope", missing=missing, granted=sorted(granted))
+        return RedirectResponse(
+            f"/settings?auth_error=strava:missing_scope_{'+'.join(missing)}",
+            status_code=303,
+        )
+
     if _consume(state, "strava") is None:
         return RedirectResponse("/settings?auth_error=strava:bad_state", status_code=303)
 
@@ -97,7 +115,7 @@ async def strava_callback(
         )
 
     await token_store.save("strava", pair)
-    log.info("auth.strava.connected", expires_at=pair.expires_at)
+    log.info("auth.strava.connected", expires_at=pair.expires_at, scope=scope)
     return RedirectResponse("/settings?connected=strava", status_code=303)
 
 

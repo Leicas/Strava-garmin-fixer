@@ -158,15 +158,16 @@ async def run_merge_job(job_id: int) -> None:
             await jobs.mark_success(job_id)
             return
 
+        # Upload-first / delete-second. Worst case is "duplicate activities"
+        # (merged + original both present), not "original gone and merge failed".
         base_desc = activity.get("description") or ""
         new_desc = f"{base_desc} {jobs.LOOP_MARKER}".strip()
         original_name = activity.get("name")
 
-        try:
-            async with StravaClient.open() as sc:
-                await _say(job_id, "strava.delete_original")
-                await sc.delete_activity(strava_id)
-
+        async with StravaClient.open() as sc:
+            # Step 1: upload merged FIT. If this fails for any reason, the
+            # original is still on Strava — we just mark the job an error.
+            try:
                 await _say(job_id, "strava.upload", bytes=n_bytes)
                 resp = await sc.upload(
                     result.fit_bytes,
@@ -177,38 +178,54 @@ async def run_merge_job(job_id: int) -> None:
                 )
                 upload_id = int(resp["id"])
                 await _say(job_id, "strava.upload_submitted", upload_id=upload_id)
-
                 final = await sc.wait_for_upload(upload_id, timeout_s=120, poll_s=3)
                 new_id = int(final["activity_id"])
                 await _say(job_id, "strava.upload_finished", new_activity_id=new_id)
+            except Exception as exc:
+                await _say(job_id, "strava.upload_failed", err=str(exc))
+                bound.error("worker.upload_failed", err=str(exc))
+                await jobs.mark_error(job_id, f"upload_failed: {exc}")
+                await jobs.record_processed(
+                    strava_id,
+                    external_id=chosen_external_id,
+                    result=f"error:upload:{exc}",
+                    notes="original is intact",
+                )
+                return
 
-                if original_name:
-                    try:
-                        await sc.update_activity(new_id, name=original_name)
-                        await _say(job_id, "strava.name_restored", name=original_name)
-                    except Exception as ne:  # noqa: BLE001 - non-fatal touch-up
-                        await _say(job_id, "strava.name_restore_failed", err=str(ne))
-        except Exception as exc:
-            await _say(
-                job_id,
-                "strava.upload_failed_after_delete",
-                err=str(exc),
-                strava_id=strava_id,
-            )
-            bound.error("worker.upload_failed_after_delete", err=str(exc))
-            await jobs.append_log(
-                job_id,
-                "ALERT: original activity may have been deleted and re-upload failed. "
-                "Manual review required.",
-            )
-            await jobs.mark_error(job_id, f"upload_failed_after_delete: {exc}")
-            await jobs.record_processed(
-                strava_id,
-                external_id=chosen_external_id,
-                result=f"error:upload_failed_after_delete:{exc}",
-                notes="original may be lost; manual review required",
-            )
-            return
+            # Step 2: restore the original name (Strava sometimes overwrites
+            # from FIT metadata). Best-effort.
+            if original_name:
+                try:
+                    await sc.update_activity(new_id, name=original_name)
+                    await _say(job_id, "strava.name_restored", name=original_name)
+                except Exception as ne:  # noqa: BLE001 - non-fatal touch-up
+                    await _say(job_id, "strava.name_restore_failed", err=str(ne))
+
+            # Step 3: delete the original. If this fails, the merged copy is
+            # already up and good — we just have a duplicate to clean up
+            # manually. Mark success but flag the duplicate.
+            try:
+                await _say(job_id, "strava.delete_original")
+                await sc.delete_activity(strava_id)
+            except Exception as exc:
+                await _say(job_id, "strava.delete_failed", err=str(exc))
+                bound.warning("worker.delete_failed_duplicate", err=str(exc),
+                              new_id=new_id, original_id=strava_id)
+                await jobs.append_log(
+                    job_id,
+                    f"WARNING: merged upload succeeded (new strava_id={new_id}) but the "
+                    f"original (strava_id={strava_id}) could not be deleted: {exc}. "
+                    f"You have a duplicate — delete one manually on Strava.",
+                )
+                await jobs.record_processed(
+                    strava_id,
+                    external_id=chosen_external_id,
+                    result="success",
+                    notes=f"new_id={new_id}; original NOT deleted (duplicate)",
+                )
+                await jobs.mark_success(job_id)
+                return
 
         await jobs.record_processed(
             strava_id,
