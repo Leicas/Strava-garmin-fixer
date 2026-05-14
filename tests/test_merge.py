@@ -160,7 +160,16 @@ def test_merge_is_deterministic() -> None:
 
 
 def test_merge_distance_mismatch_raises() -> None:
+    """When Strava has GPS *and* both candidate GPS sources disagree with
+    Strava's distance stream, the strict raise still fires — otherwise the
+    picker would silently select the better-fitting source."""
     streams, tcx_bytes, start = _make_fixtures(tcx_circle_at_origin=True)
+    # Corrupt Strava's latlng too so neither candidate matches the 500m
+    # distance stream: tiny circle near (0.1, 0.1).
+    streams["latlng"] = {
+        "data": [[0.1 + 0.00001 * i / 60.0, 0.1 + 0.00001 * i / 60.0]
+                 for i in range(60)]
+    }
 
     with pytest.raises(MergeError) as excinfo:
         merge_streams_to_fit(
@@ -172,8 +181,6 @@ def test_merge_distance_mismatch_raises() -> None:
     msg = str(excinfo.value)
     # Both numbers must appear in the message.
     assert "500" in msg  # strava distance (500m)
-    # Merged distance for a tiny ~1m circle near (0,0) should be very small;
-    # the exact integer may differ but "merged=" prefix is present.
     assert "merged=" in msg
     assert "strava=" in msg
 
@@ -181,6 +188,10 @@ def test_merge_distance_mismatch_raises() -> None:
 def test_merge_handles_missing_fitbit_segment() -> None:
     # Drop the first 2 TCX trackpoints (covers the first 10 seconds).
     streams, tcx_bytes, start = _make_fixtures(drop_first_tcx=2)
+    # Force TCX to be picked as the GPS source by removing Strava's latlng;
+    # otherwise the picker would prefer Strava's complete latlng and no
+    # extrapolation would occur.
+    streams.pop("latlng", None)
 
     # Loose tolerance: the extrapolated head-of-track samples reuse the first
     # remaining trackpoint, which slightly shrinks the merged path length.
@@ -208,3 +219,92 @@ def test_merge_handles_missing_streams() -> None:
 
     assert result.record_count == 60
     assert isinstance(result.fit_bytes, bytes) and len(result.fit_bytes) > 0
+
+
+def test_merge_default_gps_source_is_strava_when_both_match() -> None:
+    """Both sources present and well-matched → tie goes to Strava (recording device).
+    No picker warning when both sources agree closely."""
+    streams, tcx_bytes, start = _make_fixtures()
+
+    result = merge_streams_to_fit(
+        strava_streams=streams,
+        strava_start_time=start,
+        fitbit_tcx=tcx_bytes,
+    )
+
+    assert result.gps_source == "strava"
+    codes = [w.code for w in result.warnings]
+    assert "gps_source_picked" not in codes
+
+
+def test_merge_picks_google_when_strava_latlng_is_garbage() -> None:
+    """Strava latlng wildly off from its own distance stream → Google wins."""
+    streams, tcx_bytes, start = _make_fixtures()
+    # Replace Strava's latlng with a tight circle near (0,0) — haversine ~ 0m
+    # vs strava distance stream of 500m. Google TCX path remains the 500m line.
+    streams["latlng"] = {
+        "data": [[0.0 + 0.00001 * i / 60.0, 0.00001 * i / 60.0] for i in range(60)]
+    }
+
+    result = merge_streams_to_fit(
+        strava_streams=streams,
+        strava_start_time=start,
+        fitbit_tcx=tcx_bytes,
+    )
+
+    assert result.gps_source == "google_health"
+
+
+def test_merge_no_strava_latlng_softens_distance_mismatch() -> None:
+    """No Strava GPS + a TCX path whose haversine total is far off Strava's
+    distance stream: should NOT raise, should produce a soft warning, and
+    should report google_health as the GPS source."""
+    streams, tcx_bytes, start = _make_fixtures(tcx_circle_at_origin=True)
+    # Strip the latlng stream entirely — simulates a non-GPS Edge head unit
+    # (the scenario from the dashboard screenshot).
+    streams.pop("latlng", None)
+
+    result = merge_streams_to_fit(
+        strava_streams=streams,
+        strava_start_time=start,
+        fitbit_tcx=tcx_bytes,
+    )
+
+    assert result.gps_source == "google_health"
+    codes = [w.code for w in result.warnings]
+    assert "distance_mismatch_soft" in codes
+    assert isinstance(result.fit_bytes, bytes) and len(result.fit_bytes) > 0
+
+
+def test_merge_no_strava_latlng_with_matching_tcx_succeeds_cleanly() -> None:
+    """No Strava GPS but the TCX path matches Strava distance — clean merge."""
+    streams, tcx_bytes, start = _make_fixtures()
+    streams.pop("latlng", None)
+
+    result = merge_streams_to_fit(
+        strava_streams=streams,
+        strava_start_time=start,
+        fitbit_tcx=tcx_bytes,
+    )
+
+    assert result.gps_source == "google_health"
+    codes = [w.code for w in result.warnings]
+    assert "distance_mismatch_soft" not in codes
+    assert "gps_source_picked" not in codes  # only one source contributed
+
+
+def test_merge_picker_chooses_strava_when_tcx_wildly_off() -> None:
+    """Strava latlng matches distance stream, TCX is a tight circle near (0,0):
+    the picker selects Strava (better fit) and the merge succeeds.
+
+    A picker warning fires because the two sources disagree materially."""
+    streams, tcx_bytes, start = _make_fixtures(tcx_circle_at_origin=True)
+
+    result = merge_streams_to_fit(
+        strava_streams=streams,
+        strava_start_time=start,
+        fitbit_tcx=tcx_bytes,
+    )
+    assert result.gps_source == "strava"
+    codes = [w.code for w in result.warnings]
+    assert "gps_source_picked" in codes

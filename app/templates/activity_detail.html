@@ -15,6 +15,28 @@
 {% endif %}
 
 {% if activity %}
+<div class="card bg-base-100 shadow mb-4">
+  <div class="card-body">
+    <h2 class="card-title">
+      GPS (Strava)
+      {% if gps_point_count > 0 %}
+        <span class="badge badge-ghost badge-sm ml-2">{{ gps_point_count }} pts</span>
+      {% else %}
+        <span class="badge badge-warning badge-sm ml-2">no GPS recorded</span>
+      {% endif %}
+    </h2>
+    {% if gps_point_count > 0 %}
+      <div id="detail-map" style="height: 360px; border-radius: 0.5rem;"></div>
+    {% else %}
+      <p class="text-sm opacity-70">
+        Strava recorded no GPS for this activity (likely indoor or non-GPS head unit).
+        The merge will rely on Google Health's GPS only — the distance sanity check
+        is downgraded to a warning in that case.
+      </p>
+    {% endif %}
+  </div>
+</div>
+
 <div class="grid md:grid-cols-2 gap-4">
 
   <div class="card bg-base-100 shadow">
@@ -120,5 +142,21 @@
     </div>
   </div>
 </div>
+{% if gps_point_count > 0 %}
+<script>
+(function () {
+  const path = {{ gps_path_json|safe }};
+  const el = document.getElementById('detail-map');
+  if (!el || !path.length) return;
+  const map = L.map('detail-map');
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap',
+    maxZoom: 19,
+  }).addTo(map);
+  const line = L.polyline(path, { color: '#dc2626', weight: 3 }).addTo(map);
+  map.fitBounds(line.getBounds(), { padding: [20, 20] });
+})();
+</script>
+{% endif %}
 {% endif %}
 {% endblock %}

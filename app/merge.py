@@ -51,6 +51,7 @@ class MergeResult:
     record_count: int
     warnings: tuple[MergeWarning, ...]
     distance_meters: float
+    gps_source: str = "none"  # "strava", "google_health", or "none"
 
 
 class MergeError(RuntimeError):
@@ -219,6 +220,53 @@ def _extract_stream(streams: dict, key: str) -> list | None:
 # ---------------------------------------------------------------------------
 
 
+def _strava_latlng_trackpoints(
+    strava_streams: dict,
+    start_epoch_s: float,
+) -> list[_Trackpoint]:
+    """Build Trackpoints from Strava's ``latlng`` + ``time`` streams.
+
+    Returns ``[]`` when Strava has no GPS data (the common case for indoor
+    activities or non-GPS Edge head units).
+    """
+    times = _extract_stream(strava_streams, "time") or []
+    latlng = _extract_stream(strava_streams, "latlng") or []
+    if not times or not latlng:
+        return []
+    out: list[_Trackpoint] = []
+    for i in range(min(len(times), len(latlng))):
+        pair = latlng[i]
+        if not pair or len(pair) != 2:
+            continue
+        lat, lon = pair[0], pair[1]
+        if lat is None or lon is None:
+            continue
+        try:
+            t_off = float(times[i])
+            lat_f = float(lat)
+            lon_f = float(lon)
+        except (TypeError, ValueError):
+            continue
+        out.append(_Trackpoint(
+            epoch_s=start_epoch_s + t_off,
+            lat=lat_f,
+            lon=lon_f,
+            hr=None,
+        ))
+    return out
+
+
+def _haversine_total_m(points: list[_Trackpoint]) -> float:
+    """Total path length in meters along the trackpoints (lat/lon must be set)."""
+    total = 0.0
+    prev: _Trackpoint | None = None
+    for p in points:
+        if prev is not None and prev.lat is not None and p.lat is not None:
+            total += _haversine_m(prev.lat, prev.lon, p.lat, p.lon)  # type: ignore[arg-type]
+        prev = p
+    return total
+
+
 def merge_streams_to_fit(
     *,
     strava_streams: dict,
@@ -234,6 +282,16 @@ def merge_streams_to_fit(
     Health (which inherited the Fitbit data). The keyword argument
     ``fitbit_tcx`` is kept as an alias for ``source_tcx`` for backwards
     compatibility — exactly one must be provided.
+
+    Picks the more accurate GPS source automatically:
+      - If only one of {Strava ``latlng``, source TCX} has GPS, that one wins.
+      - If both have GPS, picks whichever haversine total is closer to Strava's
+        ``distance`` stream.
+      - The strict distance sanity check is only enforced when Strava itself
+        contributed GPS truth (its ``latlng`` stream); otherwise we have no
+        independent GPS to compare against and a stream-distance mismatch is
+        downgraded to a warning. This matters for indoor / non-GPS Edge head
+        units where Strava records distance from a wheel sensor.
 
     Pure / deterministic: same inputs produce byte-identical output.
     """
@@ -259,14 +317,80 @@ def merge_streams_to_fit(
     # heartrate from Strava is intentionally ignored: we trust the source TCX's HR.
     # If the source has no HR we may fall back later (not in this version).
 
-    # Parse TCX trackpoints and build aux indexes.
-    trackpoints = _parse_tcx(tcx_bytes)
-    points_with_pos = [p for p in trackpoints if p.lat is not None and p.lon is not None]
-    points_with_hr = [p for p in trackpoints if p.hr is not None]
-    pos_times = [p.epoch_s for p in points_with_pos]
+    # Parse both potential GPS sources.
+    tcx_trackpoints = _parse_tcx(tcx_bytes)
+    tcx_pos = [p for p in tcx_trackpoints if p.lat is not None and p.lon is not None]
+    strava_pos = _strava_latlng_trackpoints(strava_streams, start_epoch_s)
+    points_with_hr = [p for p in tcx_trackpoints if p.hr is not None]
     hr_times = [p.epoch_s for p in points_with_hr]
 
+    # Pre-compute Strava's stream-distance total for source picking + sanity check.
+    strava_total_distance: float
+    if distances:
+        last_valid: float | None = None
+        for d in distances:
+            if d is None:
+                continue
+            try:
+                last_valid = float(d)
+            except (TypeError, ValueError):
+                continue
+        strava_total_distance = float(last_valid) if last_valid is not None else 0.0
+    else:
+        strava_total_distance = 0.0
+
+    # Pick the GPS source. When both exist, the one whose haversine total is
+    # closer to Strava's reported distance wins; this favors the device that
+    # actually recorded the activity (no GPS drift through tunnels, etc.).
     warnings: list[MergeWarning] = []
+
+    def _err(points: list[_Trackpoint]) -> float | None:
+        if not points or strava_total_distance <= 0:
+            return None
+        return abs(_haversine_total_m(points) - strava_total_distance)
+
+    tcx_err = _err(tcx_pos)
+    strava_err = _err(strava_pos)
+
+    gps_source = "none"
+    points_with_pos: list[_Trackpoint] = []
+    if strava_pos and tcx_pos:
+        if strava_err is not None and tcx_err is not None and strava_err <= tcx_err:
+            points_with_pos = strava_pos
+            gps_source = "strava"
+        elif strava_err is not None and tcx_err is not None:
+            points_with_pos = tcx_pos
+            gps_source = "google_health"
+        else:
+            # No Strava distance to compare against — prefer Strava (recording
+            # device's own GPS) as it's normally truer to the route.
+            points_with_pos = strava_pos
+            gps_source = "strava"
+        # Only warn when the picker actually had a meaningful decision to make
+        # (one source materially worse than the other). Routine merges where
+        # both sources agree shouldn't generate noise.
+        if (
+            strava_err is not None and tcx_err is not None
+            and strava_total_distance > 0
+            and (abs(strava_err - tcx_err) / strava_total_distance) > 0.05
+        ):
+            warnings.append(MergeWarning(
+                code="gps_source_picked",
+                message=(
+                    f"Both sources have GPS (strava={len(strava_pos)} pts, "
+                    f"google={len(tcx_pos)} pts). Chose {gps_source} "
+                    f"(error vs strava distance: strava={strava_err:.0f}m, "
+                    f"google={tcx_err:.0f}m)."
+                ),
+            ))
+    elif strava_pos:
+        points_with_pos = strava_pos
+        gps_source = "strava"
+    elif tcx_pos:
+        points_with_pos = tcx_pos
+        gps_source = "google_health"
+    pos_times = [p.epoch_s for p in points_with_pos]
+
     extrapolated_count = 0
 
     # Build records.
@@ -334,30 +458,28 @@ def merge_streams_to_fit(
     if not records:
         raise MergeError("No records produced from Strava streams")
 
-    # Distance sanity check.
-    strava_total_distance: float
-    if distances:
-        # Use last non-None distance value.
-        last_valid: float | None = None
-        for d in distances:
-            if d is None:
-                continue
-            try:
-                last_valid = float(d)
-            except (TypeError, ValueError):
-                continue
-        strava_total_distance = float(last_valid) if last_valid is not None else 0.0
-    else:
-        strava_total_distance = 0.0
-
+    # Distance sanity check. Only raises when Strava itself provided GPS truth
+    # (a non-empty ``latlng`` stream); otherwise a mismatch against Strava's
+    # distance stream is downgraded to a warning, since indoor / non-GPS Edge
+    # head units commonly report wheel-sensor distances that diverge from
+    # any external GPS source by more than the default 10% tolerance.
     if strava_total_distance > 0:
         rel_err = abs(merged_distance_m - strava_total_distance) / strava_total_distance
         if rel_err > distance_tolerance:
-            raise MergeError(
+            msg = (
                 "Distance mismatch between merged GPS path and Strava distance: "
                 f"merged={merged_distance_m:.1f}m strava={strava_total_distance:.1f}m "
                 f"(relative error {rel_err:.2%}, tolerance {distance_tolerance:.2%})"
             )
+            if strava_pos:
+                raise MergeError(msg)
+            warnings.append(MergeWarning(
+                code="distance_mismatch_soft",
+                message=(
+                    msg
+                    + " — Strava has no GPS to compare against; merge proceeds."
+                ),
+            ))
 
     if extrapolated_count > 0:
         warnings.append(
@@ -442,6 +564,7 @@ def merge_streams_to_fit(
         record_count=len(records),
         warnings=tuple(warnings),
         distance_meters=merged_distance_m,
+        gps_source=gps_source,
     )
 
 

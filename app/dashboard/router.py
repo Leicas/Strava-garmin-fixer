@@ -98,6 +98,13 @@ async def _processed_lookup() -> dict[int, dict[str, Any]]:
 def _shape_activity(raw: dict[str, Any], processed: dict[int, dict[str, Any]]) -> dict[str, Any]:
     sid = int(raw["id"])
     proc = processed.get(sid)
+    # Cheap GPS-presence signal: Strava summary payload includes start_latlng
+    # / end_latlng. Empty list (or missing) means no GPS recorded — i.e., the
+    # activity was indoors or recorded on a non-GPS head unit like a wheel-
+    # sensor Edge. We use this purely as a list-view hint; the preview will
+    # do the real merge.
+    start_ll = raw.get("start_latlng") or []
+    has_gps = bool(start_ll) and start_ll != [0, 0]
     return {
         "id": sid,
         "name": raw.get("name") or "(unnamed)",
@@ -107,6 +114,7 @@ def _shape_activity(raw: dict[str, Any], processed: dict[int, dict[str, Any]]) -
         "moving_time": _format_duration(raw.get("moving_time")),
         "start": _format_date(raw.get("start_date_local")),
         "badge": _badge_for(proc["result"] if proc else None),
+        "has_gps": has_gps,
     }
 
 
@@ -259,7 +267,8 @@ async def index(request: Request) -> HTMLResponse:
 async def activity_detail(request: Request, strava_id: int) -> HTMLResponse:
     ctx: dict[str, Any] = {"strava_id": strava_id, "error": None, "activity": None,
                            "stream_summary": [], "badge": _badge_for(None),
-                           "processed": None}
+                           "processed": None, "gps_path_json": "[]",
+                           "gps_point_count": 0}
     try:
         async with StravaClient.open() as client:
             activity = await client.get_activity(strava_id)
@@ -276,6 +285,13 @@ async def activity_detail(request: Request, strava_id: int) -> HTMLResponse:
     ctx["activity_distance_km"] = (activity.get("distance") or 0) / 1000.0
     ctx["activity_moving"] = _format_duration(activity.get("moving_time"))
     ctx["start_iso"] = activity.get("start_date") or ""
+
+    # GPS path for the detail map. Empty when Strava has no latlng stream
+    # (indoor / non-GPS head unit) — the template branches on this.
+    strava_path = _strava_latlng_path(streams or {})
+    ctx["gps_path_json"] = json.dumps(strava_path)
+    ctx["gps_point_count"] = len(strava_path)
+
     ctx["stream_summary"] = sorted(
         (
             {
@@ -421,6 +437,7 @@ async def preview(request: Request, strava_id: int, external_id: str) -> HTMLRes
                 "bytes": len(result.fit_bytes),
                 "records": result.record_count,
                 "distance_m": result.distance_meters,
+                "gps_source": result.gps_source,
                 "warnings": [{"code": w.code, "message": w.message} for w in result.warnings],
             }
         except MergeError as e:

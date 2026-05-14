@@ -43,12 +43,13 @@
           <th class="text-right">Distance</th>
           <th class="text-right">Moving</th>
           <th>Device</th>
+          <th>GPS</th>
           <th>Status</th>
         </tr>
       </thead>
       <tbody>
         {% for a in activities %}
-        <tr>
+        <tr class="{% if not a.has_gps %}bg-warning/10{% endif %}">
           <td class="whitespace-nowrap">{{ a.start }}</td>
           <td>
             <a class="link link-hover" href="/activity/{{ a.id }}">{{ a.name }}</a>
@@ -58,6 +59,13 @@
           <td class="text-right tabular-nums">{{ "%.2f"|format(a.distance_km) }} km</td>
           <td class="text-right tabular-nums">{{ a.moving_time }}</td>
           <td class="text-xs opacity-70">{{ a.device_name }}</td>
+          <td>
+            {% if a.has_gps %}
+              <span class="badge badge-ghost badge-sm" title="Strava recorded GPS for this activity">GPS</span>
+            {% else %}
+              <span class="badge badge-warning badge-sm" title="Strava has no GPS for this activity — merge will rely on Google Health's GPS only">no GPS</span>
+            {% endif %}
+          </td>
           <td><span class="badge {{ a.badge.css }}">{{ a.badge.label }}</span></td>
         </tr>
         {% endfor %}

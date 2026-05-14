@@ -48,6 +48,14 @@
             <div class="stat-value text-2xl">{{ "%.0f"|format(stats.distance_m) }} m</div>
           </div>
           <div class="stat">
+            <div class="stat-title">GPS source</div>
+            <div class="stat-value text-sm">
+              {% if stats.gps_source == "strava" %}Strava
+              {% elif stats.gps_source == "google_health" %}Google Health
+              {% else %}none{% endif %}
+            </div>
+          </div>
+          <div class="stat">
             <div class="stat-title">FIT bytes</div>
             <div class="stat-value text-2xl">{{ stats.bytes }}</div>
           </div>
