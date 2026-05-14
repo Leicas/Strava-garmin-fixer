@@ -9,12 +9,12 @@
     </thead>
     <tbody>
       {% for m in matches %}
-        {% set ex = m.exercise or {} %}
+        {% set ex = (m.value.exercise if m.value and m.value.exercise else m.exercise) or {} %}
         {% set interval = ex.interval or {} %}
         {% set dpid = (m.name or '').rsplit('/', 1)[-1] %}
       <tr>
         <td class="whitespace-nowrap">{{ (interval.startTime or '')[:19] }}</td>
-        <td>{{ ex.activityType or '' }}</td>
+        <td>{{ activity_type_label(m) or '—' }}</td>
         <td class="font-mono text-xs">{{ dpid }}</td>
         <td>
           <a class="btn btn-primary btn-xs" href="/preview/{{ strava_id }}/{{ dpid }}">Preview</a>

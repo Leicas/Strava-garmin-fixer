@@ -127,13 +127,14 @@ async def _google_list(after_date: str, before_date: str | None) -> int:
     except GoogleNotConfigured as e:
         print(str(e), file=sys.stderr)
         return 2
+    from app.google_health.client import activity_type_label, _exercise_root
     for a in activities:
-        ex = a.get("exercise") or {}
+        ex = _exercise_root(a)
         interval = ex.get("interval") or {}
         name = (a.get("name") or "").rsplit("/", 1)[-1]
         print(
             f"{(interval.get('startTime') or '')[:19]:20}  {name:>20}  "
-            f"{ex.get('activityType', ''):14}"
+            f"{activity_type_label(a):14}"
         )
     return 0
 
@@ -155,14 +156,15 @@ async def _google_find_near(when_iso: str, window_minutes: int) -> int:
     if not matches:
         print(f"No Google Health exercises within +/- {window_minutes} min of {when_iso}")
         return 0
+    from app.google_health.client import activity_type_label, _exercise_root
     print(f"Found {len(matches)} match(es), closest first:")
     for a in matches:
-        ex = a.get("exercise") or {}
+        ex = _exercise_root(a)
         interval = ex.get("interval") or {}
         name = (a.get("name") or "").rsplit("/", 1)[-1]
         print(
             f"  {(interval.get('startTime') or '')[:19]}  id={name}  "
-            f"type={ex.get('activityType', '')}"
+            f"type={activity_type_label(a) or '—'}"
         )
     return 0
 

@@ -50,12 +50,12 @@
       </thead>
       <tbody>
         {% for a in activities %}
-          {% set ex = a.exercise or {} %}
+          {% set ex = (a.value.exercise if a.value and a.value.exercise else a.exercise) or {} %}
           {% set interval = ex.interval or {} %}
           {% set dpid = (a.name or '').rsplit('/', 1)[-1] %}
         <tr>
           <td class="whitespace-nowrap">{{ (interval.startTime or '')[:19] }}</td>
-          <td>{{ ex.activityType or '' }}</td>
+          <td>{{ activity_type_label(a) or '—' }}</td>
           <td class="font-mono text-xs">
             <a class="link" href="/google/exercise/{{ dpid }}">{{ dpid }}</a>
           </td>

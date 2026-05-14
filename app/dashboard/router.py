@@ -15,7 +15,11 @@ from lxml import etree
 from app import jobs as jobs_mod
 from app import tokens as token_store
 from app.db import connect
-from app.google_health.client import GoogleHealthClient, GoogleNotConfigured
+from app.google_health.client import (
+    GoogleHealthClient,
+    GoogleNotConfigured,
+    activity_type_label,
+)
 from app.merge import MergeError, merge_streams_to_fit
 from app.security import require_htmx
 from app.strava.client import StravaClient, StravaNotConfigured
@@ -24,6 +28,8 @@ log = structlog.get_logger()
 
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+# Expose helpers to templates so we don't have to pre-enrich every dict.
+templates.env.globals["activity_type_label"] = activity_type_label
 
 router = APIRouter()
 
@@ -522,14 +528,18 @@ async def google_recent(request: Request, days: int = 30) -> HTMLResponse:
     try:
         async with GoogleHealthClient.open() as client:
             after = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
-            activities = await client.list_exercises(after_date=after, page_size=25)
+            # No explicit page_size: let the client pull full pages (100 each)
+            # across all available pages within the window.
+            activities = await client.list_exercises(after_date=after)
         ctx["connected"] = True
-        activities.sort(
-            key=lambda a: (
-                ((a.get("exercise") or {}).get("interval") or {}).get("startTime") or ""
-            ),
-            reverse=True,
-        )
+
+        def _start_key(a: dict[str, Any]) -> str:
+            # Handle both {"exercise": {...}} and {"value": {"exercise": {...}}}.
+            val = a.get("value") if isinstance(a.get("value"), dict) else None
+            ex = (val or {}).get("exercise") if val else a.get("exercise")
+            return ((ex or {}).get("interval") or {}).get("startTime") or ""
+
+        activities.sort(key=_start_key, reverse=True)
         ctx["activities"] = activities
     except GoogleNotConfigured:
         pass
