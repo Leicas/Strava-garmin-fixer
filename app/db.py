@@ -41,6 +41,15 @@ async def init_db() -> None:
             )
         except aiosqlite.OperationalError:
             pass
+        # Migration: Garmin pivot — jobs and processed_activities gain a
+        # source column ('strava' | 'garmin'); existing rows are all strava.
+        for table in ("jobs", "processed_activities"):
+            try:
+                await db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN source TEXT NOT NULL DEFAULT 'strava'"
+                )
+            except aiosqlite.OperationalError:
+                pass
         await db.commit()
 
 

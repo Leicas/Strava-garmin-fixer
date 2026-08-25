@@ -25,7 +25,6 @@ from __future__ import annotations
 import base64
 import binascii
 import secrets
-from typing import Iterable
 
 import structlog
 from fastapi import HTTPException, Request, status

@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}Garmin — StravaFit{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-2xl font-semibold">Garmin activities</h1>
+  {% if connected %}
+    <span class="badge badge-success badge-outline">Garmin connected</span>
+  {% else %}
+    <span class="badge badge-warning badge-outline">Not connected</span>
+  {% endif %}
+</div>
+
+{% if error %}
+  <div class="alert alert-error mb-4">
+    <div>
+      <h3 class="font-bold">Couldn't list Garmin activities</h3>
+      <p class="text-sm mt-1">{{ error }}</p>
+      <p class="text-xs opacity-70 mt-1">
+        First-time setup: set <code>GARMIN_EMAIL</code> / <code>GARMIN_PASSWORD</code> in the
+        deploy env, or seed the token cache with <code>stravafit garmin login</code>
+        (required once if your account uses MFA).
+      </p>
+    </div>
+  </div>
+{% endif %}
+
+{% if jobs %}
+<h2 class="text-lg font-semibold mb-2">Recent Garmin jobs</h2>
+<div class="overflow-x-auto bg-base-100 rounded-lg shadow mb-6">
+  <table class="table table-zebra">
+    <thead>
+      <tr>
+        <th>id</th><th>activity</th><th>trigger</th><th>status</th>
+        <th>started</th><th>finished</th><th>error</th>
+      </tr>
+    </thead>
+    <tbody id="garmin-job-rows">
+      {% for job in jobs %}
+        {% include "partials/job_row.html" %}
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="overflow-x-auto bg-base-100 rounded-lg shadow mb-6 {% if not connected %}hidden{% endif %}">
+  <table class="table table-zebra">
+    <tbody id="garmin-job-rows"></tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if connected and not error %}
+  {% if not activities %}
+    <div class="alert"><span>No Garmin activities returned. Sync your Edge first.</span></div>
+  {% else %}
+    <div class="overflow-x-auto bg-base-100 rounded-lg shadow">
+      <table class="table table-zebra">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Name</th>
+            <th>Type</th>
+            <th class="text-right">Distance</th>
+            <th class="text-right">Duration</th>
+            <th>GPS</th>
+            <th>Status</th>
+            <th>Merge</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for a in activities %}
+          <tr class="{% if not a.has_gps %}bg-warning/10{% endif %}">
+            <td class="whitespace-nowrap">{{ a.start }}</td>
+            <td>
+              {{ a.name }}
+              <a class="link link-hover opacity-50 ml-2"
+                 href="https://connect.garmin.com/modern/activity/{{ a.id }}"
+                 target="_blank" title="Open on Garmin Connect">↗</a>
+            </td>
+            <td>{{ a.type }}</td>
+            <td class="text-right tabular-nums">{{ "%.2f"|format(a.distance_km) }} km</td>
+            <td class="text-right tabular-nums">{{ a.duration }}</td>
+            <td>
+              {% if a.has_gps %}
+                <span class="badge badge-ghost badge-sm">GPS</span>
+              {% else %}
+                <span class="badge badge-warning badge-sm"
+                      title="No GPS on Garmin — merge will rely on Google Health's GPS only">no GPS</span>
+              {% endif %}
+            </td>
+            <td><span class="badge {{ a.badge.css }}">{{ a.badge.label }}</span></td>
+            <td>
+              <div class="join">
+                <form hx-post="/garmin/activity/{{ a.id }}/merge"
+                      hx-target="#garmin-job-rows" hx-swap="afterbegin">
+                  <input type="hidden" name="mode" value="dry_run">
+                  <button class="btn btn-ghost btn-xs join-item" type="submit"
+                          title="Merge only — no delete/upload">Dry run</button>
+                </form>
+                <form hx-post="/garmin/activity/{{ a.id }}/merge"
+                      hx-target="#garmin-job-rows" hx-swap="afterbegin">
+                  <input type="hidden" name="mode" value="semi_auto">
+                  <button class="btn btn-outline btn-xs join-item" type="submit"
+                          title="Merge, then pause for you to delete the original on Garmin">Semi</button>
+                </form>
+                <form hx-post="/garmin/activity/{{ a.id }}/merge"
+                      hx-target="#garmin-job-rows" hx-swap="afterbegin"
+                      hx-confirm="Auto-replace deletes the original on Garmin Connect before uploading the merged FIT. Continue?">
+                  <input type="hidden" name="mode" value="auto">
+                  <button class="btn btn-primary btn-xs join-item" type="submit">Auto</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="text-xs opacity-70 mt-3">
+      Heads-up: with Garmin→Strava sync enabled the <em>original</em> reaches Strava
+      before the merge runs. After a replace, delete the original on strava.com by
+      hand — the merged version syncs over from Garmin automatically.
+    </p>
+  {% endif %}
+{% endif %}
+{% endblock %}

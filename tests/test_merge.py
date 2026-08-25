@@ -9,7 +9,6 @@ import pytest
 from app.merge import (
     MergeError,
     MergeResult,
-    MergeWarning,
     merge_streams_to_fit,
 )
 

@@ -115,7 +115,7 @@ def run_local_oauth_flow(scopes: str = DEFAULT_SCOPES, timeout: int = 300) -> st
         if in_container:
             print(f"Container mode: open this URL in your host browser:\n  {auth_url}\n")
         else:
-            print(f"Opening browser for Strava authorization...")
+            print("Opening browser for Strava authorization...")
             print(f"If it doesn't open, visit:\n  {auth_url}\n")
             webbrowser.open(auth_url)
 

@@ -11,7 +11,7 @@ from app import jobs
 from app.config import settings
 from app.google_health.client import GoogleHealthClient, GoogleNotConfigured
 from app.merge import MergeError, merge_streams_to_fit
-from app.strava.client import StravaClient, StravaNotConfigured, StravaUploadError
+from app.strava.client import StravaClient, StravaNotConfigured
 
 log = structlog.get_logger()
 
@@ -38,10 +38,20 @@ async def _say(job_id: int, line: str, **kwargs: Any) -> None:
 
 
 async def run_merge_job(job_id: int) -> None:
-    """Drive the merge pipeline for a queued job. Must not raise — all errors recorded."""
+    """Drive the merge pipeline for a queued job. Must not raise — all errors recorded.
+
+    Dispatches on the job's source: 'garmin' jobs run the Garmin pipeline
+    (app.garmin.worker); everything else is the original Strava path below.
+    """
     job = await jobs.get(job_id)
     if job is None:
         log.warning("worker.job_missing", job_id=job_id)
+        return
+
+    if job.get("source") == jobs.SOURCE_GARMIN:
+        from app.garmin.worker import run_garmin_merge_job
+
+        await run_garmin_merge_job(job_id)
         return
 
     strava_id = int(job["strava_id"])
@@ -279,6 +289,13 @@ async def resume_upload(job_id: int) -> None:
     if job is None:
         log.warning("worker.resume_missing", job_id=job_id)
         return
+
+    if job.get("source") == jobs.SOURCE_GARMIN:
+        from app.garmin.worker import resume_garmin_upload
+
+        await resume_garmin_upload(job_id)
+        return
+
     if job["status"] != "awaiting_delete":
         log.warning("worker.resume_wrong_status", job_id=job_id, status=job["status"])
         return
@@ -339,10 +356,10 @@ async def resume_upload(job_id: int) -> None:
         bound.error("worker.resume_failed", err=str(exc))
         await jobs.append_log(
             job_id,
-            f"RECOVERY: merged FIT is still on disk. Most likely cause: "
-            f"the original wasn't actually deleted yet (Strava dedup), or "
-            f"a transient API error. Click 'Upload now' again to retry, or "
-            f"download the recovery FIT and upload manually via Strava UI.",
+            "RECOVERY: merged FIT is still on disk. Most likely cause: "
+            "the original wasn't actually deleted yet (Strava dedup), or "
+            "a transient API error. Click 'Upload now' again to retry, or "
+            "download the recovery FIT and upload manually via Strava UI.",
         )
         # Keep status as awaiting_delete so the user can retry from the UI.
         await jobs.set_status(job_id, "awaiting_delete")

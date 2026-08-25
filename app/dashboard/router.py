@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,9 @@ from lxml import etree
 
 from app import jobs as jobs_mod
 from app import tokens as token_store
+from app.config import settings
 from app.db import connect
+from app.garmin.client import GarminClient, GarminNotConfigured
 from app.google_health.client import (
     GoogleHealthClient,
     GoogleNotConfigured,
@@ -66,6 +69,8 @@ def _badge_for(result: str | None) -> dict[str, str]:
         return {"label": "Merged", "css": "badge-success"}
     if result == "merged_manually":
         return {"label": "Merged (manual)", "css": "badge-success badge-outline"}
+    if result.startswith("passthrough"):
+        return {"label": "Passthrough", "css": "badge-info badge-outline"}
     if result == "pending_manual_review":
         return {"label": "Review", "css": "badge-warning"}
     if result.startswith("skipped"):
@@ -93,10 +98,12 @@ def _parse_strava_start(iso: str | None) -> datetime:
     return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-async def _processed_lookup() -> dict[int, dict[str, Any]]:
+async def _processed_lookup(source: str = "strava") -> dict[int, dict[str, Any]]:
     async with connect() as db:
         rows = await (await db.execute(
-            "SELECT strava_id, external_id, result, notes FROM processed_activities"
+            "SELECT strava_id, external_id, result, notes FROM processed_activities "
+            "WHERE source = ?",
+            (source,),
         )).fetchall()
     return {int(r["strava_id"]): dict(r) for r in rows}
 
@@ -637,6 +644,158 @@ async def google_strava_matches(
     )
 
 
+# ---------- garmin -----------------------------------------------------------
+
+def _shape_garmin_activity(
+    raw: dict[str, Any], processed: dict[int, dict[str, Any]]
+) -> dict[str, Any]:
+    gid = int(raw["activityId"])
+    proc = processed.get(gid)
+    type_key = (raw.get("activityType") or {}).get("typeKey") or ""
+    start_local = (raw.get("startTimeLocal") or raw.get("startTimeGMT") or "")[:16]
+    duration_s = raw.get("duration")
+    return {
+        "id": gid,
+        "name": raw.get("activityName") or "(unnamed)",
+        "type": type_key.replace("_", " "),
+        "distance_km": (raw.get("distance") or 0) / 1000.0,
+        "duration": _format_duration(int(duration_s) if duration_s else None),
+        "start": start_local,
+        "badge": _badge_for(proc["result"] if proc else None),
+        "has_gps": bool(raw.get("hasPolyline")),
+    }
+
+
+@router.get("/garmin", response_class=HTMLResponse)
+async def garmin_index(request: Request) -> HTMLResponse:
+    ctx: dict[str, Any] = {
+        "connected": False,
+        "activities": [],
+        "error": None,
+        "jobs": [],
+    }
+    try:
+        async with GarminClient.open() as gc:
+            raw = await gc.list_recent_activities(limit=50)
+        processed = await _processed_lookup(source="garmin")
+        ctx["connected"] = True
+        ctx["activities"] = [_shape_garmin_activity(a, processed) for a in raw]
+    except GarminNotConfigured as e:
+        ctx["error"] = str(e)
+    except Exception as e:  # noqa: BLE001 - unofficial API; surface anything in the UI
+        log.warning("garmin.list_failed", err=str(e))
+        ctx["connected"] = True
+        ctx["error"] = f"Garmin Connect error: {e}"
+    # Show recent garmin jobs on the same page so the HTMX rows have somewhere to land.
+    rows = await jobs_mod.list_recent(50)
+    ctx["jobs"] = [_shape_job(j) for j in rows if (j.get("source") or "strava") == "garmin"][:10]
+    return templates.TemplateResponse(request, "garmin_recent.html", ctx)
+
+
+@router.post("/garmin/activity/{garmin_id}/merge", response_class=HTMLResponse,
+             dependencies=[Depends(require_htmx)])
+async def garmin_activity_merge(
+    request: Request,
+    garmin_id: int,
+    bg: BackgroundTasks,
+    external_id: str | None = Form(None),
+    mode: str = Form(jobs_mod.MODE_AUTO),
+) -> HTMLResponse:
+    from app.worker import run_merge_job
+
+    if mode not in (jobs_mod.MODE_DRY_RUN, jobs_mod.MODE_AUTO, jobs_mod.MODE_SEMI_AUTO):
+        raise HTTPException(400, f"invalid mode {mode!r}")
+
+    job_id = await jobs_mod.enqueue(
+        garmin_id,
+        external_id=external_id,
+        trigger="manual",
+        mode=mode,
+        source=jobs_mod.SOURCE_GARMIN,
+    )
+    bg.add_task(run_merge_job, job_id)
+    job = await jobs_mod.get(job_id) or {
+        "id": job_id, "status": "queued", "strava_id": garmin_id,
+        "started_at": None, "finished_at": None, "trigger": "manual",
+        "dry_run": 1 if mode == jobs_mod.MODE_DRY_RUN else 0,
+        "mode": mode, "error": None, "source": "garmin",
+        "external_id": external_id, "log": "", "recovery_path": None,
+    }
+    return templates.TemplateResponse(
+        request, "partials/job_row.html",
+        {"job": _shape_job(job)},
+    )
+
+
+# ---------- dreeve export hand-off -------------------------------------------
+#
+# The Garmin worker drops definitive FITs into <data>/export/. A cron on the
+# Dreeve host lists them (plain text), downloads each, moves it into Dreeve's
+# watch folder, then DELETEs the export. All routes sit behind the global
+# Basic-auth middleware. DELETE is not forgeable cross-origin by a browser
+# form, so no HTMX/CSRF dependency is needed.
+
+_EXPORT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.fit$")
+
+
+def _export_file(name: str) -> Path:
+    if not _EXPORT_NAME_RE.match(name):
+        raise HTTPException(400, "invalid export name")
+    return settings.dreeve_export_dir / name
+
+
+@router.get("/export/", response_class=Response)
+async def export_list() -> Response:
+    d = settings.dreeve_export_dir
+    names = sorted(p.name for p in d.glob("*.fit")) if d.is_dir() else []
+    return Response("\n".join(names) + ("\n" if names else ""), media_type="text/plain")
+
+
+@router.get("/export/{name}")
+async def export_get(name: str) -> FileResponse:
+    path = _export_file(name)
+    if not path.is_file():
+        raise HTTPException(404, "no such export")
+    return FileResponse(path, media_type="application/octet-stream", filename=name)
+
+
+@router.delete("/export/{name}")
+async def export_ack(name: str) -> Response:
+    path = _export_file(name)
+    if not path.is_file():
+        raise HTTPException(404, "no such export")
+    path.unlink()
+    log.info("dreeve.export_acked", name=name)
+    return Response(status_code=204)
+
+
+# ---------- garmin token seeding ----------------------------------------------
+
+@router.post("/settings/garmin-tokens")
+async def garmin_tokens_import(request: Request) -> dict[str, str]:
+    """Seed the Garmin token cache with a garmin_tokens.json payload (the
+    format python-garminconnect and the dreeve-garmin-connector both dump).
+    Lets an already-authenticated session be reused instead of doing a fresh
+    credential login (Garmin rate-limits accounts that log in repeatedly).
+
+    JSON body only — a cross-origin browser form can't send application/json
+    without a CORS preflight, so this needs no HTMX header. Basic auth applies.
+    """
+    if "application/json" not in (request.headers.get("content-type") or ""):
+        raise HTTPException(415, "send the garmin_tokens.json content as application/json")
+    raw = await request.body()
+    try:
+        json.loads(raw)
+    except ValueError as exc:
+        raise HTTPException(400, f"not valid JSON: {exc}") from exc
+    tokens_dir = Path(settings.garmin_tokens_path).expanduser()
+    tokens_dir.mkdir(parents=True, exist_ok=True)
+    out = tokens_dir / "garmin_tokens.json"
+    out.write_bytes(raw)
+    log.info("garmin.tokens_imported", path=str(out), bytes=len(raw))
+    return {"status": "ok", "path": str(out)}
+
+
 # ---------- jobs -------------------------------------------------------------
 
 def _shape_job(j: dict[str, Any]) -> dict[str, Any]:
@@ -657,6 +816,7 @@ def _shape_job(j: dict[str, Any]) -> dict[str, Any]:
         "log": (j.get("log") or "").strip(),
         "has_recovery": has_recovery,
         "awaiting_delete": (j.get("status") == "awaiting_delete"),
+        "source": j.get("source") or "strava",
     }
 
 

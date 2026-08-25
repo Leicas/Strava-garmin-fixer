@@ -24,9 +24,15 @@ services:
       - .env
     environment:
       DATABASE_PATH: /data/state.db
+      GARMIN_TOKENS_PATH: /data/garmin_tokens
+      DREEVE_EXPORT_DIR: /dreeve-watch
       IN_CONTAINER: "1"
     volumes:
       - ./data:/data
+      # Dreeve hand-off: point DREEVE_WATCH_DIR at Dreeve's real watch folder
+      # when co-located (e.g. /etc/komodo/stacks/strava-stats/watch). The
+      # default keeps the export local so nothing breaks on a lone deploy.
+      - ${DREEVE_WATCH_DIR:-./data/export}:/dreeve-watch
     ports:
       # Web UI + webhook receiver + OAuth callbacks. Bound to loopback —
       # your tunnel (Cloudflare Tunnel, Tailscale Funnel, etc.) handles ingress.

@@ -6,7 +6,13 @@
     {% endif %}>
   <td class="font-mono">{{ job.id }}</td>
   <td>
-    <a href="/activity/{{ job.strava_id }}" class="link">{{ job.strava_id }}</a>
+    {% if job.source == "garmin" %}
+      <a href="https://connect.garmin.com/modern/activity/{{ job.strava_id }}"
+         class="link" target="_blank" rel="noopener">{{ job.strava_id }}</a>
+      <span class="badge badge-accent badge-outline badge-xs ml-1">garmin</span>
+    {% else %}
+      <a href="/activity/{{ job.strava_id }}" class="link">{{ job.strava_id }}</a>
+    {% endif %}
     {% if job.mode == "dry_run" %}<span class="badge badge-ghost badge-xs ml-1">dry</span>
     {% elif job.mode == "semi_auto" %}<span class="badge badge-info badge-outline badge-xs ml-1">semi</span>
     {% endif %}
@@ -34,15 +40,24 @@
       </p>
       <ol class="list-decimal ml-5 text-sm space-y-1">
         <li>
+          {% if job.source == "garmin" %}
+          <a class="link link-primary"
+             href="https://connect.garmin.com/modern/activity/{{ job.strava_id }}"
+             target="_blank" rel="noopener">
+            Open the original on Garmin Connect ↗
+          </a>
+          → gear menu → <strong>Delete Activity</strong>.
+          {% else %}
           <a class="link link-primary"
              href="https://www.strava.com/activities/{{ job.strava_id }}"
              target="_blank" rel="noopener">
             Open the original on Strava ↗
           </a>
           → click the <code>...</code> menu → <strong>Delete</strong>.
+          {% endif %}
         </li>
         <li>
-          Once Strava shows it's gone, click below to auto-upload the merged version:
+          Once it's gone, click below to auto-upload the merged version:
         </li>
       </ol>
       <div class="flex gap-2">

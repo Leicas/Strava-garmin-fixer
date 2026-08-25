@@ -19,7 +19,18 @@ async def lifespan(app: FastAPI):
     configure_logging()
     await init_db()
     log.info("startup", db=str(settings.database_path), base_url=settings.public_base_url)
-    yield
+    poll_task = None
+    if settings.garmin_poll_minutes > 0:
+        import asyncio
+
+        from app.garmin.poller import poll_loop
+
+        poll_task = asyncio.create_task(poll_loop(), name="garmin-poller")
+    try:
+        yield
+    finally:
+        if poll_task is not None:
+            poll_task.cancel()
 
 
 app = FastAPI(title="StravaFit", lifespan=lifespan)

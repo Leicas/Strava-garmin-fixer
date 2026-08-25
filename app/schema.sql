@@ -10,18 +10,19 @@ CREATE TABLE IF NOT EXISTS tokens (
 );
 
 CREATE TABLE IF NOT EXISTS processed_activities (
-    strava_id   INTEGER PRIMARY KEY,
+    strava_id   INTEGER PRIMARY KEY,          -- source activity id (Garmin activityId when source='garmin')
     external_id TEXT,                         -- source data point id (Google Health: numeric string)
     merged_at   INTEGER NOT NULL,
     result      TEXT NOT NULL,                -- 'success' | 'skipped:no_match' | 'pending_manual_review' | 'error:...'
-    notes       TEXT
+    notes       TEXT,
+    source      TEXT NOT NULL DEFAULT 'strava' -- 'strava' | 'garmin'
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    strava_id     INTEGER NOT NULL,
+    strava_id     INTEGER NOT NULL,            -- source activity id (Garmin activityId when source='garmin')
     external_id   TEXT,                        -- source data point id
-    trigger       TEXT NOT NULL,               -- 'webhook' | 'manual' | 'preview'
+    trigger       TEXT NOT NULL,               -- 'webhook' | 'manual' | 'preview' | 'poller'
     status        TEXT NOT NULL,               -- 'queued' | 'running' | 'awaiting_delete' | 'success' | 'error'
     dry_run       INTEGER NOT NULL DEFAULT 0,  -- legacy boolean kept for back-compat
     mode          TEXT NOT NULL DEFAULT 'auto',-- 'dry_run' | 'auto' | 'semi_auto'
@@ -29,7 +30,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at   INTEGER,
     error         TEXT,
     log           TEXT,
-    recovery_path TEXT                         -- on-disk merged FIT for failed replace ops
+    recovery_path TEXT,                        -- on-disk merged FIT for failed replace ops
+    source        TEXT NOT NULL DEFAULT 'strava' -- 'strava' | 'garmin'
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_strava_id ON jobs(strava_id);

@@ -16,6 +16,8 @@ dependencies = [
     "structlog>=24.4",
     "fit-tool>=0.9",
     "lxml>=5.3",
+    "garminconnect>=0.3.11",
+    "curl-cffi>=0.16.2",
 ]
 
 [project.optional-dependencies]

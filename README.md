@@ -1,9 +1,65 @@
 # StravaFit
 
 Auto-merge Fitbit GPS + HR with Garmin Edge cadence/speed/temperature streams,
-then replace the original Strava activity with the merged file.
+then replace the original activity with the merged file.
 
 See `PLAN.md` for the full architecture; phases 0–6 are all shipped.
+
+## ⚠ Strava API paywall (June 2026) → Garmin Connect is now the primary target
+
+Strava's Developer Program requires a paid Strava subscription for API access
+since 2026-06-30. Without one the app is flagged **"Application Status:
+Inactive"** and every API call returns a bare `403 Forbidden` — which is why
+the Strava pages of this dashboard broke. Two ways out:
+
+- Pay for Strava and reactivate the app at <https://www.strava.com/settings/api>
+  — the original Strava flow below then works again unchanged.
+- **Use the Garmin Connect pivot (default):** the Edge already syncs to Garmin
+  Connect, so StravaFit now downloads the original FIT from Garmin, merges in
+  Google Health GPS+HR, and **replaces the activity on Garmin**. Garmin's
+  native Strava sync pushes the merged activity to Strava for free.
+
+### Garmin setup
+
+1. Set `GARMIN_EMAIL` / `GARMIN_PASSWORD` in `.env` (unofficial API — your own
+   account credentials via `python-garminconnect`, no dev program).
+2. If the account has MFA, run `stravafit garmin login` once interactively to
+   seed the token cache (`data/garmin_tokens/`, lasts ~a year). Headless
+   logins resume from the cache afterwards.
+3. Open **/garmin** in the dashboard: list activities, then per row —
+   **Dry run** (merge only), **Semi** (merge, pause for you to delete the
+   original on Garmin Connect, then upload), **Auto** (delete + upload).
+4. Optional poller (replaces the Strava webhook as the automatic trigger):
+   set `GARMIN_POLL_MINUTES=15` (`GARMIN_POLL_MODE=auto|semi_auto|dry_run`).
+   It honors the same *auto merge* toggle on /settings.
+5. CLI equivalents: `stravafit garmin list | fetch-fit | run-merge | delete-activity`.
+
+**Strava cleanup caveat:** with Garmin→Strava sync on, the *original* reaches
+Strava seconds after the ride — before any merge can run — and without API
+access it can't be deleted programmatically. After each replace, delete the
+original on strava.com by hand; the merged version syncs over from Garmin
+automatically. Job logs remind you.
+
+### Feeding Dreeve
+
+StravaFit can act as [Dreeve](https://dreeve.app)'s Garmin connector, delivering
+the *enriched* activity instead of the raw one: set `DREEVE_EXPORT_ENABLED=1`
+and point the compose variable `DREEVE_WATCH_DIR` at Dreeve's watch folder
+(when co-located). Every handled activity produces exactly one file there —
+the merged FIT when a Google Health match exists, the original FIT otherwise
+("Passthrough" badge). The same files are served over the authenticated
+`/export/` API (list / fetch / DELETE-to-ack) if the two apps ever live on
+different hosts.
+
+Dreeve skips imports whose (sport type, start time) already exist, so the
+stock `dreeve-garmin-connector` download loop must be disabled — if it
+delivers the raw original first, the merged version is skipped forever.
+Activities it already imported can only be upgraded by deleting them in
+Dreeve's admin and letting StravaFit re-deliver.
+
+To reuse an existing Garmin session instead of a fresh credential login
+(Garmin rate-limits repeat logins), POST the connector's `garmin_tokens.json`
+to `/settings/garmin-tokens` (Basic auth, `Content-Type: application/json`).
 
 ## Run locally (host Python via uv)
 
@@ -190,6 +246,10 @@ app/
   security.py        BasicAuthMiddleware + require_htmx CSRF guard
   auth_router.py     /auth/{strava,google}/{start,callback}
   strava/{auth,client}.py         OAuth + API client
+  garmin/client.py                Garmin Connect client (unofficial API, curl_cffi)
+  garmin/fitparse.py              FIT bytes -> merge-shaped streams (pure)
+  garmin/worker.py                Garmin-sourced merge pipeline (replace on Garmin)
+  garmin/poller.py                background poller (Garmin has no personal webhooks)
   google_health/{auth,client}.py  OAuth + API client (replaces Fitbit)
   dashboard/router.py             HTMX-friendly routes
   templates/...                   Jinja2 + Tailwind/DaisyUI/HTMX (CDN)

@@ -13,7 +13,6 @@ from app import jobs as jobs_mod
 from app import tokens as token_store
 from app.config import settings
 from app.db import init_db
-from app.google_health import auth as google_auth
 from app.google_health.client import GoogleHealthClient, GoogleNotConfigured
 from app.merge import MergeError, merge_streams_to_fit
 from app.strava import auth as strava_auth
@@ -86,10 +85,10 @@ async def _strava_delete(activity_id: int) -> int:
                 body = e.response.text[:200]
                 if code in (401, 403):
                     print(f"DELETE returned {code} → token lacks delete permission")
-                    print(f"   (re-authorize and check ALL scope boxes, especially activity:write)")
+                    print("   (re-authorize and check ALL scope boxes, especially activity:write)")
                 elif code == 404:
                     print(f"DELETE returned 404 → token CAN delete; activity {activity_id} doesn't exist")
-                    print(f"   This is a successful permission test — try with a real activity id.")
+                    print("   This is a successful permission test — try with a real activity id.")
                 else:
                     print(f"DELETE returned {code}: {body}")
                 return 0
@@ -98,7 +97,7 @@ async def _strava_delete(activity_id: int) -> int:
         return 2
 
     print(f"DELETE returned 204 — activity {activity_id} was actually deleted.")
-    print(f"  ⚠ It's gone for good. Hope that was a test ride.")
+    print("  ⚠ It's gone for good. Hope that was a test ride.")
     return 0
 
 
@@ -116,6 +115,115 @@ async def _strava_streams(activity_id: int, out: str | None) -> int:
     else:
         print(blob)
     return 0
+
+
+# ---------- Garmin commands ----------
+
+async def _garmin_login() -> int:
+    """Interactive login: seeds the on-disk token cache (handles MFA).
+    After this, headless server logins resume from the cache."""
+    from app.garmin.client import GarminClient, GarminNotConfigured
+
+    if not (settings.garmin_email and settings.garmin_password):
+        print("Set GARMIN_EMAIL and GARMIN_PASSWORD in .env first.", file=sys.stderr)
+        return 2
+    try:
+        async with GarminClient.open(mfa_prompt=lambda: input("Garmin MFA code: ")) as gc:
+            acts = await gc.list_recent_activities(limit=1)
+    except GarminNotConfigured as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    print(f"Garmin authorized. Token cache: {settings.garmin_tokens_path}")
+    if acts:
+        print(f"Latest activity: {acts[0].get('startTimeLocal')}  {acts[0].get('activityName')}")
+    return 0
+
+
+async def _garmin_list(limit: int) -> int:
+    from app.garmin.client import GarminClient, GarminNotConfigured
+
+    try:
+        async with GarminClient.open() as gc:
+            activities = await gc.list_recent_activities(limit=limit)
+    except GarminNotConfigured as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    for a in activities:
+        type_key = (a.get("activityType") or {}).get("typeKey") or ""
+        print(
+            f"{(a.get('startTimeLocal') or ''):20}  {a.get('activityId'):>13}  "
+            f"{type_key:16}  {(a.get('distance') or 0) / 1000:6.2f} km  "
+            f"{(a.get('activityName') or '')[:50]}"
+        )
+    return 0
+
+
+async def _garmin_fetch_fit(activity_id: int, out: str | None) -> int:
+    from app.garmin.client import GarminClient, GarminNotConfigured
+    from app.garmin.fitparse import parse_fit_streams
+
+    try:
+        async with GarminClient.open() as gc:
+            fit = await gc.download_original_fit(activity_id)
+    except GarminNotConfigured as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    if out:
+        Path(out).write_bytes(fit)
+        print(f"Wrote {out} ({len(fit)} bytes)")
+    parsed = parse_fit_streams(fit)
+    print(f"start={parsed.start_time.isoformat()} records={parsed.record_count} sport={parsed.sport}")
+    for key, payload in parsed.streams.items():
+        data = payload["data"]
+        n_set = sum(1 for v in data if v is not None)
+        print(f"  {key:18} n={len(data):>6}  non-null={n_set}")
+    return 0
+
+
+async def _garmin_delete(activity_id: int) -> int:
+    """Probe: try deleting a (throwaway!) Garmin activity to confirm the
+    unofficial API's delete works for this account."""
+    from app.garmin.client import GarminClient, GarminNotConfigured
+
+    try:
+        async with GarminClient.open() as gc:
+            await gc.delete_activity(activity_id)
+    except GarminNotConfigured as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    except Exception as e:  # noqa: BLE001 - report the exact failure
+        print(f"DELETE failed: {type(e).__name__}: {e}")
+        return 1
+    print(f"Deleted Garmin activity {activity_id}. ⚠ It's gone for good.")
+    return 0
+
+
+async def _garmin_run_merge(
+    garmin_id: int, external_id: str | None, mode: str
+) -> int:
+    from app.worker import run_merge_job
+
+    await init_db()
+    job_id = await jobs_mod.enqueue(
+        garmin_id,
+        external_id=external_id,
+        trigger="manual",
+        mode=mode,
+        source=jobs_mod.SOURCE_GARMIN,
+    )
+    print(f"enqueued job {job_id} (garmin_id={garmin_id}, mode={mode})")
+    await run_merge_job(job_id)
+    job = await jobs_mod.get(job_id)
+    if job is None:
+        print("job vanished after run", file=sys.stderr)
+        return 4
+    print(f"\njob {job_id} status={job['status']}")
+    if job.get("error"):
+        print(f"  error: {job['error']}")
+    if job.get("log"):
+        print("---- log ----")
+        print(job["log"])
+    return 0 if job["status"] in ("success", "awaiting_delete") else 5
 
 
 # ---------- Google Health commands ----------
@@ -280,6 +388,38 @@ def _build_parser() -> argparse.ArgumentParser:
              "Use a throwaway test activity id — if it works, the activity is gone.")
     p_del.add_argument("activity_id", type=int)
 
+    # garmin ---------------------------------------------------------------
+    garmin = sub.add_parser("garmin", help="Garmin Connect CLI (unofficial API)")
+    garmin_sub = garmin.add_subparsers(dest="garmin_cmd", required=True)
+    garmin_sub.add_parser(
+        "login",
+        help="Interactive credential login (handles MFA) — seeds the token cache "
+             "so headless server logins work afterwards",
+    )
+
+    p_gm_list = garmin_sub.add_parser("list", help="List recent Garmin activities")
+    p_gm_list.add_argument("--limit", type=int, default=20)
+
+    p_gm_fit = garmin_sub.add_parser("fetch-fit", help="Download + summarize an activity's original FIT")
+    p_gm_fit.add_argument("activity_id", type=int)
+    p_gm_fit.add_argument("--out", help="Also write the raw FIT to this path")
+
+    p_gm_del = garmin_sub.add_parser("delete-activity",
+        help="Probe: delete a throwaway Garmin activity to confirm write access works")
+    p_gm_del.add_argument("activity_id", type=int)
+
+    p_gm_run = garmin_sub.add_parser(
+        "run-merge",
+        help="Run the full Garmin merge pipeline (download FIT + Google Health + replace on Garmin)",
+    )
+    p_gm_run.add_argument("garmin_id", type=int)
+    p_gm_run.add_argument("--external-id", default=None,
+                          help="Force a specific Google Health exercise data-point id")
+    p_gm_run.add_argument("--dry-run", action="store_true",
+                          help="Produce the merged FIT but do NOT delete/upload")
+    p_gm_run.add_argument("--semi", action="store_true",
+                          help="Merge, then pause for manual delete on Garmin Connect")
+
     # google ---------------------------------------------------------------
     google = sub.add_parser("google", help="Google Health CLI")
     google_sub = google.add_subparsers(dest="google_cmd", required=True)
@@ -338,6 +478,23 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_strava_streams(args.activity_id, args.out))
         if args.strava_cmd == "delete-activity":
             return asyncio.run(_strava_delete(args.activity_id))
+
+    if args.cmd == "garmin":
+        if args.garmin_cmd == "login":
+            return asyncio.run(_garmin_login())
+        if args.garmin_cmd == "list":
+            return asyncio.run(_garmin_list(args.limit))
+        if args.garmin_cmd == "fetch-fit":
+            return asyncio.run(_garmin_fetch_fit(args.activity_id, args.out))
+        if args.garmin_cmd == "delete-activity":
+            return asyncio.run(_garmin_delete(args.activity_id))
+        if args.garmin_cmd == "run-merge":
+            mode = jobs_mod.MODE_AUTO
+            if args.dry_run:
+                mode = jobs_mod.MODE_DRY_RUN
+            elif args.semi:
+                mode = jobs_mod.MODE_SEMI_AUTO
+            return asyncio.run(_garmin_run_merge(args.garmin_id, args.external_id, mode))
 
     if args.cmd == "google":
         if args.google_cmd == "list":

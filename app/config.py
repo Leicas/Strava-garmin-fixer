@@ -23,6 +23,35 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
 
+    # Garmin Connect (unofficial API — account credentials, no dev program).
+    # Since Strava paywalled its API (June 2026), Garmin Connect is the
+    # primary replace target: merged FITs are uploaded here and Garmin's
+    # native sync pushes them on to Strava.
+    garmin_email: str = ""
+    garmin_password: str = ""
+    garmin_tokens_path: Path = Path("data/garmin_tokens")
+    # Poller: checks Garmin for new activities every N minutes. 0 disables.
+    garmin_poll_minutes: int = 0
+    garmin_poll_mode: str = "auto"  # 'dry_run' | 'semi_auto' | 'auto'
+    # Only auto-enqueue activities that started within this window.
+    garmin_poll_lookback_hours: int = 48
+    # Don't touch an activity until it is at least this old — gives the
+    # Fitbit/Pixel watch time to sync its data to Google Health, so the merge
+    # sees the HR source. Activities with no match after this age are
+    # delivered to Dreeve as-is (passthrough).
+    garmin_poll_min_age_minutes: int = 120
+
+    # Dreeve hand-off: when enabled, the Garmin worker drops the definitive
+    # FIT (merged when matched, original otherwise) into dreeve_export_dir.
+    # When co-located with Dreeve, bind-mount Dreeve's watch folder there and
+    # the daemon imports within 5 minutes; the /export HTTP API serves the
+    # same directory as a remote fallback. IMPORTANT: Dreeve dedups on
+    # (sport, start time) — the stock dreeve-garmin-connector's download loop
+    # must be OFF or Dreeve imports the unmerged original first and skips the
+    # merged file forever.
+    dreeve_export_enabled: bool = False
+    dreeve_export_dir: Path = Path("data/export")
+
     # Webhook
     verify_token: str = Field(default="change-me", min_length=1)
     # If set, the webhook handler drops events whose owner_id != this. Strava
