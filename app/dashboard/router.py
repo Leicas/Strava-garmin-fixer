@@ -602,6 +602,21 @@ async def google_exercise_detail(request: Request, external_id: str) -> HTMLResp
     return templates.TemplateResponse(request, "google_exercise.html", ctx)
 
 
+async def _google_exercise_start(external_id: str) -> datetime:
+    """Start time of a Google Health exercise, read from its TCX (there is no
+    cheap direct-GET for a single data point)."""
+    async with GoogleHealthClient.open() as gc:
+        tcx_bytes = await gc.get_exercise_tcx(external_id)
+    try:
+        root = etree.fromstring(tcx_bytes)
+    except etree.XMLSyntaxError:
+        raise RuntimeError("could not parse TCX")
+    first = root.find(".//tcd:Trackpoint/tcd:Time", TCX_NS)
+    if first is None or not first.text:
+        raise RuntimeError("TCX has no trackpoints with a Time element")
+    return datetime.fromisoformat(first.text.replace("Z", "+00:00"))
+
+
 @router.get("/google/{external_id}/_strava_matches", response_class=HTMLResponse)
 async def google_strava_matches(
     request: Request, external_id: str
@@ -610,24 +625,7 @@ async def google_strava_matches(
     matches: list[dict[str, Any]] = []
     error: str | None = None
     try:
-        async with GoogleHealthClient.open() as gc:
-            # Fetch the exercise to read its start time.
-            tcx = None  # not actually needed
-            # Cheaper: list_exercises filters by civil date, so fall back to
-            # a direct GET of the data point would be ideal but we don't have
-            # that endpoint. Use the start time from the TCX.
-            tcx_bytes = await gc.get_exercise_tcx(external_id)
-        # Parse first <Time> from the TCX as the exercise start.
-        from lxml import etree
-        try:
-            root = etree.fromstring(tcx_bytes)
-        except etree.XMLSyntaxError:
-            raise RuntimeError("could not parse TCX")
-        first = root.find(".//tcd:Trackpoint/tcd:Time", TCX_NS)
-        if first is None or not first.text:
-            raise RuntimeError("TCX has no trackpoints with a Time element")
-        when = datetime.fromisoformat(first.text.replace("Z", "+00:00"))
-
+        when = await _google_exercise_start(external_id)
         async with StravaClient.open() as sc:
             matches = await sc.find_near(when, window_minutes=120)
     except StravaNotConfigured:
@@ -640,6 +638,39 @@ async def google_strava_matches(
     return templates.TemplateResponse(
         request,
         "partials/strava_matches.html",
+        {"external_id": external_id, "matches": matches, "error": error},
+    )
+
+
+@router.get("/google/{external_id}/_garmin_matches", response_class=HTMLResponse)
+async def google_garmin_matches(
+    request: Request, external_id: str
+) -> HTMLResponse:
+    """HTMX fragment: list Garmin activities near a Google Health exercise's
+    start time, with merge actions pinned to this exercise's data point."""
+    matches: list[dict[str, Any]] = []
+    error: str | None = None
+    try:
+        when = await _google_exercise_start(external_id)
+        async with GarminClient.open() as gc:
+            raw = await gc.find_near(when, window_minutes=120)
+        for m in raw:
+            matches.append({
+                "id": int(m["activityId"]),
+                "name": m.get("activityName") or "(unnamed)",
+                "start": (m.get("startTimeLocal") or m.get("startTimeGMT") or "")[:19],
+                "type": ((m.get("activityType") or {}).get("typeKey") or "").replace("_", " "),
+            })
+    except GarminNotConfigured:
+        error = "Garmin not connected. Seed tokens via /settings/garmin-tokens or `stravafit garmin login`."
+    except GoogleNotConfigured:
+        error = "Google Health not connected."
+    except Exception as e:  # noqa: BLE001 - unofficial API; surface in UI
+        error = f"{type(e).__name__}: {e}"
+
+    return templates.TemplateResponse(
+        request,
+        "partials/garmin_matches.html",
         {"external_id": external_id, "matches": matches, "error": error},
     )
 
