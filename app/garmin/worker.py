@@ -212,14 +212,13 @@ async def run_garmin_merge_job(job_id: int) -> None:
             await _say(job_id, "garmin_worker.awaiting_delete", garmin_id=garmin_id)
             return
 
-        # MODE_AUTO: delete original on Garmin, then upload the merged FIT.
-        # Garmin also rejects duplicate uploads for the same timeframe, so the
-        # delete must come first; the recovery file is the safety net.
+        # MODE_AUTO: upload the merged FIT FIRST, confirm it actually imported,
+        # and only then delete the original. Garmin accepts a same-start
+        # duplicate while both exist (verified 2026-08-25), so this order is
+        # safe — and it means a rejected/lost upload leaves the original
+        # untouched instead of deleting a ride we can't replace.
         try:
             async with GarminClient.open() as gc:
-                await _say(job_id, "garmin.delete_original")
-                await gc.delete_activity(garmin_id)
-
                 await _say(job_id, "garmin.upload", bytes=n_bytes)
                 resp = await gc.upload_fit(
                     result.fit_bytes, stem=f"stravafit-{garmin_id}"
@@ -227,15 +226,23 @@ async def run_garmin_merge_job(job_id: int) -> None:
                 failures = gc.upload_failures(resp)
                 if failures:
                     raise RuntimeError(f"garmin upload rejected: {'; '.join(failures)[:300]}")
-                new_id = gc.uploaded_activity_id(resp)
-                await _say(job_id, "garmin.upload_finished", new_activity_id=new_id)
+                await _say(job_id, "garmin.upload_accepted",
+                           upload_id=(resp.get("detailedImportResult") or {}).get("uploadId"))
 
-                if new_id is not None and activity_name:
+                new_id = await gc.wait_for_activity(
+                    start_dt, exclude_ids={garmin_id}, timeout_s=180
+                )
+                await _say(job_id, "garmin.upload_confirmed", new_activity_id=new_id)
+
+                if activity_name:
                     try:
                         await gc.set_activity_name(new_id, activity_name)
                         await _say(job_id, "garmin.name_restored", name=activity_name)
                     except Exception as ne:  # noqa: BLE001 - non-fatal touch-up
                         await _say(job_id, "garmin.name_restore_failed", err=str(ne))
+
+                await _say(job_id, "garmin.delete_original")
+                await gc.delete_activity(garmin_id)
         except Exception as exc:  # noqa: BLE001 - surface in job state
             await _say(job_id, "garmin.replace_failed", err=str(exc),
                        recovery=str(recovery_path))
@@ -243,9 +250,9 @@ async def run_garmin_merge_job(job_id: int) -> None:
                         recovery=str(recovery_path))
             await jobs.append_log(
                 job_id,
-                f"RECOVERY: merged FIT is on disk at {recovery_path.name}. "
-                f"Download it from /jobs/{job_id}/recovery.fit and upload to "
-                f"Garmin Connect manually (Import Data) to recover.",
+                f"The ORIGINAL is untouched on Garmin (upload is confirmed before "
+                f"any delete). Merged FIT kept at {recovery_path.name} — download "
+                f"from /jobs/{job_id}/recovery.fit to import manually.",
             )
             await jobs.mark_error(job_id, f"replace_failed: {exc}")
             await _record(garmin_id, external_id=chosen_external_id,
@@ -306,14 +313,17 @@ async def resume_garmin_upload(job_id: int) -> None:
     new_id: int | None = None
     try:
         fit_bytes = rp.read_bytes()
+        start_dt = parse_fit_streams(fit_bytes).start_time
         async with GarminClient.open() as gc:
             await _say(job_id, "garmin.upload", bytes=len(fit_bytes))
             resp = await gc.upload_fit(fit_bytes, stem=f"stravafit-{garmin_id}")
             failures = gc.upload_failures(resp)
             if failures:
                 raise RuntimeError(f"garmin upload rejected: {'; '.join(failures)[:300]}")
-            new_id = gc.uploaded_activity_id(resp)
-            await _say(job_id, "garmin.upload_finished", new_activity_id=new_id)
+            new_id = await gc.wait_for_activity(
+                start_dt, exclude_ids={garmin_id}, timeout_s=180
+            )
+            await _say(job_id, "garmin.upload_confirmed", new_activity_id=new_id)
     except Exception as exc:  # noqa: BLE001 - surface in job state
         await _say(job_id, "garmin.resume_failed", err=str(exc))
         bound.error("garmin_worker.resume_failed", err=str(exc))

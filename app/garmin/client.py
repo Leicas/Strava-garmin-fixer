@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import time
 import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -167,20 +168,75 @@ class GarminClient:
         return data
 
     async def upload_fit(self, fit_bytes: bytes, *, stem: str = "merged") -> dict[str, Any]:
-        """Upload a FIT file. Returns the parsed API response (shape:
-        detailedImportResult with successes/failures)."""
+        """Upload a FIT file. Returns the parsed 202 response body (shape:
+        detailedImportResult; import itself is asynchronous — confirm with
+        wait_for_activity).
+
+        Raises RuntimeError unless Garmin answers 202 Accepted. In particular
+        Garmin answers **204 No Content** for a FIT its importer won't parse
+        (e.g. one missing the activity message) — that is a rejection, not a
+        success, even though the library's upload_activity() reports it as an
+        empty dict. This bit us on 2026-08-25: two activities were deleted
+        after "successful" uploads that never imported.
+        """
         import tempfile
 
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / f"{stem}.fit"
-            path.write_bytes(fit_bytes)
-            resp = await asyncio.to_thread(self._g.upload_activity, str(path))
-        if hasattr(resp, "json"):
+        def _post() -> dict[str, Any]:
+            with tempfile.TemporaryDirectory() as td:
+                path = Path(td) / f"{stem}.fit"
+                path.write_bytes(fit_bytes)
+                with path.open("rb") as fh:
+                    resp = self._g.client.post(
+                        "connectapi",
+                        self._g.garmin_connect_upload,
+                        files={"file": (path.name, fh)},
+                    )
+            status = getattr(resp, "status_code", None)
             try:
-                resp = resp.json()
-            except Exception:  # noqa: BLE001 - keep the raw object
-                pass
-        return resp if isinstance(resp, dict) else {"raw": str(resp)}
+                body = resp.json()
+            except Exception:  # noqa: BLE001 - non-JSON body
+                body = {}
+            if status != 202:
+                raise RuntimeError(
+                    f"Garmin upload returned HTTP {status!r} (expected 202) — "
+                    f"the FIT was NOT imported. body={str(body)[:200]}"
+                )
+            return body if isinstance(body, dict) else {}
+
+        return await asyncio.to_thread(_post)
+
+    async def wait_for_activity(
+        self,
+        start_time: datetime,
+        *,
+        exclude_ids: frozenset[int] | set[int] = frozenset(),
+        timeout_s: float = 180.0,
+        poll_s: float = 6.0,
+        tolerance_s: float = 90.0,
+    ) -> int:
+        """Poll the activity list until an activity starting within
+        ``tolerance_s`` of ``start_time`` (and not in ``exclude_ids``)
+        appears; return its activityId. Raises TimeoutError otherwise.
+
+        This is the only reliable confirmation that an async upload actually
+        imported — the upload-status endpoint is not consistently available."""
+        if start_time.tzinfo is None:
+            start_time = start_time.replace(tzinfo=timezone.utc)
+        deadline = time.monotonic() + timeout_s
+        while True:
+            for a in await self.list_recent_activities(limit=10):
+                gid = a.get("activityId")
+                st = _parse_gmt(a.get("startTimeGMT"))
+                if gid is None or st is None or int(gid) in exclude_ids:
+                    continue
+                if abs((st - start_time).total_seconds()) <= tolerance_s:
+                    return int(gid)
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"uploaded activity near {start_time.isoformat()} did not "
+                    f"appear on Garmin within {timeout_s:.0f}s"
+                )
+            await asyncio.sleep(poll_s)
 
     @staticmethod
     def uploaded_activity_id(upload_resp: dict[str, Any]) -> int | None:

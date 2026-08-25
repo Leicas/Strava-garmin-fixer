@@ -21,6 +21,9 @@
         <td class="text-xs opacity-70">{{ m.type }}</td>
         <td>
           <div class="join">
+            <a class="btn btn-accent btn-xs join-item"
+               href="/garmin/preview/{{ m.id }}/{{ external_id }}"
+               title="Map + stream diff of Garmin FIT vs Google Health, no writes">Preview</a>
             <form hx-post="/garmin/activity/{{ m.id }}/merge"
                   hx-target="#garmin-match-jobs" hx-swap="afterbegin">
               <input type="hidden" name="external_id" value="{{ external_id }}">

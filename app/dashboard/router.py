@@ -758,6 +758,119 @@ async def garmin_activity_merge(
     )
 
 
+# ---------- garmin preview ----------------------------------------------------
+
+async def _garmin_fit_and_meta(garmin_id: int) -> tuple[Any, str, Any]:
+    """(parsed FIT, activity name, start datetime) for a Garmin activity."""
+    from app.garmin.fitparse import parse_fit_streams
+    from app.garmin.client import parse_start_gmt
+
+    async with GarminClient.open() as gc:
+        summary = await gc.get_activity(garmin_id)
+        fit_bytes = await gc.download_original_fit(garmin_id)
+    parsed = parse_fit_streams(fit_bytes)
+    name = ""
+    start_dt = parsed.start_time
+    if summary:
+        name = summary.get("activityName") or ""
+        start_dt = parse_start_gmt(summary) or start_dt
+    return parsed, name, start_dt
+
+
+@router.get("/garmin/preview/{garmin_id}/{external_id}", response_class=HTMLResponse)
+async def garmin_preview(request: Request, garmin_id: int, external_id: str) -> HTMLResponse:
+    """Same diff view as the Strava preview, sourced from the Garmin FIT:
+    both GPS tracks on one map, both stream sets charted, and the merge
+    result (or its error) — without touching anything."""
+    ctx: dict[str, Any] = {
+        "preview_source": "garmin",
+        "strava_id": garmin_id,  # template variable name is legacy
+        "external_id": external_id,
+        "error": None,
+        "warnings": [],
+        "stats": None,
+        "edge_path_json": "[]",
+        "source_path_json": "[]",
+        "activity_name": "",
+    }
+    try:
+        parsed, name, start_dt = await _garmin_fit_and_meta(garmin_id)
+        ctx["activity_name"] = name
+        ctx["activity_started_at"] = start_dt.strftime("%Y-%m-%d %H:%M UTC")
+
+        async with GoogleHealthClient.open() as gc:
+            tcx = await gc.get_exercise_tcx(external_id)
+
+        edge_path = _strava_latlng_path(parsed.streams)
+        source_path = _tcx_path(tcx)
+
+        merge_error: str | None = None
+        result_summary: dict[str, Any] | None = None
+        try:
+            result = merge_streams_to_fit(
+                strava_streams=parsed.streams,
+                strava_start_time=start_dt,
+                source_tcx=tcx,
+                activity_name=name or "Merged ride",
+            )
+            result_summary = {
+                "bytes": len(result.fit_bytes),
+                "records": result.record_count,
+                "distance_m": result.distance_meters,
+                "gps_source": result.gps_source,
+                "warnings": [{"code": w.code, "message": w.message} for w in result.warnings],
+            }
+        except MergeError as e:
+            merge_error = str(e)
+
+        ctx["edge_path_json"] = json.dumps(edge_path)
+        ctx["source_path_json"] = json.dumps(source_path)
+        ctx["edge_point_count"] = len(edge_path)
+        ctx["source_point_count"] = len(source_path)
+        ctx["stats"] = result_summary
+        ctx["merge_error"] = merge_error
+        ctx["strava_series_json"] = json.dumps(_strava_chart_series(parsed.streams))
+        ctx["source_series_json"] = json.dumps(_tcx_chart_series(tcx))
+
+    except GarminNotConfigured:
+        ctx["error"] = "Garmin not connected."
+    except GoogleNotConfigured:
+        ctx["error"] = "Google Health not connected."
+    except Exception as e:  # noqa: BLE001 - surface in UI
+        ctx["error"] = f"{type(e).__name__}: {e}"
+
+    return templates.TemplateResponse(request, "preview.html", ctx)
+
+
+@router.get("/garmin/preview/{garmin_id}/{external_id}/download.fit")
+async def garmin_preview_download(garmin_id: int, external_id: str) -> Response:
+    """Run the merge inline (Garmin FIT + Google TCX) and return the FIT
+    bytes as a download — no writes anywhere."""
+    try:
+        parsed, name, start_dt = await _garmin_fit_and_meta(garmin_id)
+        async with GoogleHealthClient.open() as gc:
+            tcx = await gc.get_exercise_tcx(external_id)
+        result = merge_streams_to_fit(
+            strava_streams=parsed.streams,
+            strava_start_time=start_dt,
+            source_tcx=tcx,
+            activity_name=name or "Merged ride",
+        )
+    except GarminNotConfigured:
+        raise HTTPException(412, "Garmin not connected")
+    except GoogleNotConfigured:
+        raise HTTPException(412, "Google Health not connected")
+    except MergeError as e:
+        raise HTTPException(422, f"merge failed: {e}")
+
+    filename = f"garmin-{garmin_id}-merged.fit"
+    return Response(
+        content=result.fit_bytes,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ---------- dreeve export hand-off -------------------------------------------
 #
 # The Garmin worker drops definitive FITs into <data>/export/. A cron on the

@@ -19,12 +19,14 @@ from datetime import datetime, timezone
 from lxml import etree
 
 from fit_tool.fit_file_builder import FitFileBuilder
+from fit_tool.profile.messages.activity_message import ActivityMessage
 from fit_tool.profile.messages.event_message import EventMessage
 from fit_tool.profile.messages.file_id_message import FileIdMessage
 from fit_tool.profile.messages.lap_message import LapMessage
 from fit_tool.profile.messages.record_message import RecordMessage
 from fit_tool.profile.messages.session_message import SessionMessage
 from fit_tool.profile.profile_type import (
+    Activity,
     Event,
     EventType,
     FileType,
@@ -555,6 +557,24 @@ def merge_streams_to_fit(
     session.event = Event.SESSION
     session.event_type = EventType.STOP
     builder.add(session)
+
+    # Activity envelope. Strava imports files without it, but Garmin
+    # Connect's importer silently rejects (HTTP 204, no error) any FIT that
+    # lacks the activity message — so it is required for the Garmin replace
+    # flow. local_timestamp is deliberately equal to timestamp (UTC): we have
+    # no timezone input, and Garmin re-derives display timezone from GPS.
+    activity = ActivityMessage()
+    activity.timestamp = last_ms
+    # fit-tool quirk: unlike `timestamp` (unix ms, converted internally),
+    # `local_timestamp` is written raw — seconds since the FIT epoch
+    # (1989-12-31T00:00:00Z = unix 631065600).
+    activity.local_timestamp = int(last_ms // 1000) - 631_065_600
+    activity.total_timer_time = elapsed_s
+    activity.num_sessions = 1
+    activity.type = Activity.MANUAL
+    activity.event = Event.ACTIVITY
+    activity.event_type = EventType.STOP
+    builder.add(activity)
 
     fit_file = builder.build()
     fit_bytes = fit_file.to_bytes()
